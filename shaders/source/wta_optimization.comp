@@ -1,0 +1,90 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// 输入输出绑定
+layout(binding = 0, r32f) uniform readonly image3D cost_volume;
+layout(binding = 1, r32f) uniform writeonly image2D disparity_map;
+layout(binding = 2, r32f) uniform writeonly image2D confidence_map;
+
+// Uniform缓冲区
+layout(binding = 3, std140) uniform WTAParams {
+    int image_width;           // 图像宽度
+    int image_height;          // 图像高度
+    int max_disparity;         // 最大视差
+    int min_disparity;         // 最小视差
+    float uniqueness_ratio;    // 唯一性比率
+    int subpixel_refinement;   // 子像素优化
+    int consistency_check;     // 一致性检查
+} params;
+
+// 二次曲线拟合子像素优化
+float parabolaFit(float cost_minus1, float cost0, float cost_plus1) {
+    float delta = (cost_minus1 - cost_plus1) / (2.0 * (cost_minus1 - 2.0 * cost0 + cost_plus1));
+    return clamp(delta, -0.5, 0.5);
+}
+
+void main() {
+    ivec2 global_coord = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (global_coord.x >= params.image_width || global_coord.y >= params.image_height) {
+        return;
+    }
+    
+    // 寻找最小代价的视差
+    float min_cost = 1.0e6;
+    float second_min_cost = 1.0e6;
+    int best_disparity = 0;
+    
+    for (int d = 0; d < params.max_disparity; d++) {
+        float cost = imageLoad(cost_volume, ivec3(global_coord.x, global_coord.y, d)).r;
+        
+        if (cost < min_cost) {
+            second_min_cost = min_cost;
+            min_cost = cost;
+            best_disparity = d;
+        } else if (cost < second_min_cost) {
+            second_min_cost = cost;
+        }
+    }
+    
+    // 计算置信度
+    float confidence = 0.0;
+    if (second_min_cost > 0.0) {
+        confidence = 1.0 - (min_cost / second_min_cost);
+    }
+    
+    // 唯一性检查
+    bool unique_enough = true;
+    if (params.uniqueness_ratio > 0.0) {
+        float uniqueness = (second_min_cost - min_cost) / min_cost;
+        unique_enough = (uniqueness * 100.0) >= params.uniqueness_ratio;
+    }
+    
+    // 子像素优化
+    float subpixel_offset = 0.0;
+    if (params.subpixel_refinement != 0 && best_disparity > 0 && best_disparity < params.max_disparity - 1) {
+        float cost_prev = imageLoad(cost_volume, ivec3(global_coord.x, global_coord.y, best_disparity - 1)).r;
+        float cost_curr = min_cost;
+        float cost_next = imageLoad(cost_volume, ivec3(global_coord.x, global_coord.y, best_disparity + 1)).r;
+        
+        subpixel_offset = parabolaFit(cost_prev, cost_curr, cost_next);
+    }
+    
+    // 计算最终视差
+    float final_disparity = float(best_disparity + params.min_disparity) + subpixel_offset;
+    
+    // 如果没有足够的唯一性，标记为无效
+    if (!unique_enough) {
+        final_disparity = -1.0; // 无效视差
+        confidence = 0.0;
+    }
+    
+    // 存储结果
+    imageStore(disparity_map, global_coord, vec4(final_disparity, 0.0, 0.0, 0.0));
+    imageStore(confidence_map, global_coord, vec4(confidence, 0.0, 0.0, 0.0));
+}

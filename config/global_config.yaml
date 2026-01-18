@@ -1,0 +1,288 @@
+# OrangePiZero3-StereoDepth 全局配置文件
+# 最后更新：2026年1月18日
+# 作者：C01-JNU
+
+# ==============================
+# 1. 系统设置
+# ==============================
+system:
+  # 运行模式: CPU, GPU_VULKAN, DEBUG
+  mode: "GPU_VULKAN"
+  
+  # 调试级别: TRACE, DEBUG, INFO, WARN, ERROR, FATAL
+  debug_level: "INFO"
+  
+  # 启用日志
+  enable_logging: true
+  
+  # 日志文件路径
+  log_file: "logs/stereo_depth.log"
+  
+  # 性能监控
+  enable_profiling: true
+  profile_log_interval: 5  # 秒
+
+# ==============================
+# 2. 摄像头设置
+# ==============================
+camera:
+  # 摄像头配置（由摄像头驱动程序API处理）
+  # 这里只放逻辑配置，不包含硬件路径
+  
+  # 图像分辨率
+  resolution:
+    width: 640
+    height: 480
+  
+  # 帧率
+  fps: 30
+  
+  # 图像格式
+  format: "YUYV"
+
+# ==============================
+# 3. 标定设置
+# ==============================
+calibration:
+  # 棋盘格参数
+  chessboard:
+    width: 9         # 横向内角点数
+    height: 6        # 纵向内角点数
+    square_size: 15  # 每个格子实际尺寸（毫米）
+  
+  # 自动捕获参数
+  auto_capture:
+    enabled: true
+    min_images: 20          # 最少捕获图像数量
+    auto_save: true         # 满足条件自动保存
+    check_interval: 1.0     # 检查间隔（秒）
+  
+  # 标定文件路径
+  calibration_file: "calibration_results/stereo_calibration.yml"
+
+# ==============================
+# 4. 图像路径配置
+# ==============================
+paths:
+  test_images: "images/test/"         # 测试用图像
+  output_images: "images/output/"     # 处理输出图像
+  calibration_images: "images/calibration/"  # 标定用图像
+
+# ==============================
+# 5. Vulkan GPU深度计算流水线参数
+# ==============================
+vulkan_stereo:
+  # ====== 基础参数 ======
+  # 视差范围
+  disparity:
+    min: 0
+    max: 64
+  
+  # 图像金字塔层数
+  pyramid_levels: 3
+  
+  # ====== Census变换阶段 ======
+  census_transform:
+    # 窗口尺寸
+    window_size: 9
+    
+    # 是否为方形窗口
+    square_window: true
+    
+    # 阈值参数
+    threshold: 25
+    
+    # 是否使用中心像素
+    use_center_pixel: true
+    
+    # 比特位数（影响特征描述长度）
+    bit_length: 64
+  
+  # ====== 代价计算阶段 ======
+  cost_computation:
+    # 代价类型: HAMMING, CENSUS, SAD, SSD
+    cost_type: "HAMMING"
+    
+    # 代价聚合窗口尺寸
+    aggregation_window: 5
+    
+    # 代价聚合方式: FIXED_WINDOW, ADAPTIVE_WEIGHT, CROSS_BASED
+    aggregation_method: "FIXED_WINDOW"
+    
+    # P1参数（平滑约束）
+    p1: 10.0
+    
+    # P2参数（不连续性约束）
+    p2: 100.0
+  
+  # ====== WTA阶段 ======
+  wta:
+    # 唯一性约束比率（百分比）
+    uniqueness_ratio: 15
+    
+    # 是否进行左右一致性检查
+    lr_consistency_check: true
+    
+    # 一致性检查阈值
+    consistency_threshold: 1.0
+    
+    # 子像素精度
+    subpixel_refinement: true
+    
+    # 子像素精度方法: PARABOLA, LINEAR, QUADRATIC
+    subpixel_method: "PARABOLA"
+  
+  # ====== 后处理阶段 ======
+  post_processing:
+    # 中值滤波窗口尺寸
+    median_filter_size: 3
+    
+    # 空洞填充方法: NONE, SIMPLE, WEIGHTED, FILL
+    hole_filling: "WEIGHTED"
+    
+    # 空洞填充最大视差
+    hole_filling_max_disparity: 32
+    
+    # 斑点滤波
+    speckle_filter:
+      enabled: true
+      window_size: 100
+      range: 32
+    
+    # 视差图滤波
+    disparity_filter:
+      enabled: true
+      filter_type: "BILATERAL"
+      sigma_color: 10.0
+      sigma_space: 10.0
+    
+    # 边缘保护
+    edge_preserving: true
+    edge_threshold: 5.0
+  
+  # ====== Vulkan特定参数 ======
+  vulkan_specific:
+    # 工作组大小
+    workgroup_size: [16, 16, 1]
+    
+    # 计算着色器优化级别
+    shader_optimization: 3
+    
+    # 是否启用验证层（开发时启用）
+    enable_validation: false
+    
+    # 内存使用策略
+    memory_strategy: "PERFORMANCE"  # PERFORMANCE, BALANCED, MEMORY_SAVING
+    
+    # 管道缓存大小（MB）
+    pipeline_cache_size: 50
+
+# ==============================
+# 6. CPU备用算法参数
+# ==============================
+cpu_stereo:
+  # 算法类型: BM, SGBM, VAR
+  algorithm: "SGBM"
+  
+  # SGBM特定参数
+  sgbm:
+    min_disparity: 0
+    num_disparities: 64
+    block_size: 5
+    p1: 600
+    p2: 2400
+    disp12_max_diff: 10
+    pre_filter_cap: 63
+    uniqueness_ratio: 10
+    speckle_window_size: 100
+    speckle_range: 32
+    mode: "SGBM"  # SGBM, HH, SGBM_3WAY
+
+# ==============================
+# 7. 深度图生成参数
+# ==============================
+depth:
+  # 摄像头参数（从标定文件读取）
+  # 这里只放默认值
+  focal_length: 2.8     # 毫米
+  baseline: 65.0       # 毫米
+  pixel_size: 0.0014   # 毫米/像素
+  
+  # 深度范围
+  min_depth: 0.1       # 米
+  max_depth: 10.0      # 米
+  
+  # 深度图后处理
+  post_process:
+    # 深度滤波
+    depth_filter: true
+    filter_size: 5
+    
+    # 深度图空洞填充
+    fill_holes: true
+    
+    # 深度图平滑
+    smooth_depth: true
+    smooth_sigma: 1.0
+
+# ==============================
+# 8. ROS2集成（可选）
+# ==============================
+ros2:
+  enabled: false
+  node_name: "stereo_depth_node"
+  topics:
+    left_image: "/camera/left/image_raw"
+    right_image: "/camera/right/image_raw"
+    disparity: "/stereo/disparity"
+    depth: "/stereo/depth"
+    pointcloud: "/stereo/points"
+
+# ==============================
+# 9. 性能优化参数
+# ==============================
+performance:
+  # 内存限制
+  memory:
+    cpu_limit_mb: 512
+    gpu_limit_mb: 256
+  
+  # 线程配置
+  threading:
+    enable_multi_thread: true
+    thread_count: 4     # 0表示自动检测
+  
+  # 流水线优化
+  pipeline:
+    async_processing: true
+    queue_size: 3
+  
+  # ARM平台特定优化
+  arm_optimization:
+    use_neon: true
+    use_gpu_shader: true
+    optimize_for_mali: true
+
+# ==============================
+# 10. 输出配置
+# ==============================
+output:
+  # 保存选项
+  save:
+    disparity_map: true
+    depth_map: true
+    point_cloud: false
+    confidence_map: false
+  
+  # 输出格式
+  format:
+    disparity: "PNG"
+    depth: "PNG"
+    point_cloud: "PLY"
+  
+  # 可视化选项
+  visualization:
+    show_disparity: true
+    show_depth: false
+    colormap: "JET"
+    normalize: true

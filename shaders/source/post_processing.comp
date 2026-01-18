@@ -1,0 +1,158 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// 输入输出绑定
+layout(binding = 0, r32f) uniform readonly image2D raw_disparity;
+layout(binding = 1, r32f) uniform readonly image2D confidence_map;
+layout(binding = 2, r32f) uniform writeonly image2D processed_disparity;
+
+// Uniform缓冲区
+layout(binding = 3, std140) uniform PostProcessParams {
+    int image_width;           // 图像宽度
+    int image_height;          // 图像高度
+    int median_filter_size;    // 中值滤波尺寸
+    int speckle_filter;        // 斑点滤波
+    int speckle_window_size;   // 斑点窗口尺寸
+    int speckle_range;         // 斑点范围
+    int hole_filling;          // 空洞填充
+    float edge_threshold;      // 边缘阈值
+} params;
+
+// 中值滤波
+float medianFilter(ivec2 coord) {
+    int radius = params.median_filter_size / 2;
+    int total = params.median_filter_size * params.median_filter_size;
+    
+    float values[49]; // 支持最多7x7窗口
+    
+    int count = 0;
+    for (int dy = -radius; dy <= radius; dy++) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            ivec2 sample_coord = coord + ivec2(dx, dy);
+            
+            if (sample_coord.x >= 0 && sample_coord.x < params.image_width &&
+                sample_coord.y >= 0 && sample_coord.y < params.image_height) {
+                
+                float disparity = imageLoad(raw_disparity, sample_coord).r;
+                if (disparity >= 0.0) {
+                    values[count] = disparity;
+                    count++;
+                }
+            }
+        }
+    }
+    
+    if (count == 0) {
+        return -1.0;
+    }
+    
+    // 简单排序取中值
+    for (int i = 0; i < count - 1; i++) {
+        for (int j = i + 1; j < count; j++) {
+            if (values[j] < values[i]) {
+                float temp = values[i];
+                values[i] = values[j];
+                values[j] = temp;
+            }
+        }
+    }
+    
+    return values[count / 2];
+}
+
+// 空洞填充
+float holeFilling(ivec2 coord, float current_disparity) {
+    if (current_disparity >= 0.0) {
+        return current_disparity;
+    }
+    
+    // 在周围寻找有效视差
+    int search_radius = 3;
+    float sum = 0.0;
+    int count = 0;
+    
+    for (int dy = -search_radius; dy <= search_radius; dy++) {
+        for (int dx = -search_radius; dx <= search_radius; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            
+            ivec2 sample_coord = coord + ivec2(dx, dy);
+            
+            if (sample_coord.x >= 0 && sample_coord.x < params.image_width &&
+                sample_coord.y >= 0 && sample_coord.y < params.image_height) {
+                
+                float disparity = imageLoad(raw_disparity, sample_coord).r;
+                if (disparity >= 0.0) {
+                    sum += disparity;
+                    count++;
+                }
+            }
+        }
+    }
+    
+    return (count > 0) ? (sum / float(count)) : -1.0;
+}
+
+void main() {
+    ivec2 global_coord = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (global_coord.x >= params.image_width || global_coord.y >= params.image_height) {
+        return;
+    }
+    
+    // 读取原始视差和置信度
+    float raw_disp = imageLoad(raw_disparity, global_coord).r;
+    float confidence = imageLoad(confidence_map, global_coord).r;
+    
+    // 步骤1: 中值滤波
+    float filtered_disp = raw_disp;
+    if (params.median_filter_size > 1) {
+        filtered_disp = medianFilter(global_coord);
+    }
+    
+    // 步骤2: 置信度过滤
+    if (confidence < 0.5) { // 低置信度
+        filtered_disp = -1.0;
+    }
+    
+    // 步骤3: 空洞填充
+    if (params.hole_filling != 0 && filtered_disp < 0.0) {
+        filtered_disp = holeFilling(global_coord, filtered_disp);
+    }
+    
+    // 步骤4: 斑点滤波（简化版）
+    if (params.speckle_filter != 0 && filtered_disp >= 0.0) {
+        int radius = params.speckle_window_size / 2;
+        int similar_count = 0;
+        int total_count = 0;
+        
+        for (int dy = -radius; dy <= radius && dy < params.speckle_window_size; dy++) {
+            for (int dx = -radius; dx <= radius && dx < params.speckle_window_size; dx++) {
+                ivec2 sample_coord = global_coord + ivec2(dx, dy);
+                
+                if (sample_coord.x >= 0 && sample_coord.x < params.image_width &&
+                    sample_coord.y >= 0 && sample_coord.y < params.image_height) {
+                    
+                    total_count++;
+                    float sample_disp = imageLoad(raw_disparity, sample_coord).r;
+                    
+                    if (abs(sample_disp - filtered_disp) <= params.speckle_range) {
+                        similar_count++;
+                    }
+                }
+            }
+        }
+        
+        // 如果相似像素太少，认为是斑点
+        if (total_count > 0 && (float(similar_count) / float(total_count)) < 0.5) {
+            filtered_disp = -1.0;
+        }
+    }
+    
+    // 存储处理后的视差
+    imageStore(processed_disparity, global_coord, vec4(filtered_disp, 0.0, 0.0, 0.0));
+}
