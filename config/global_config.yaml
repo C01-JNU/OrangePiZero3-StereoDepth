@@ -1,0 +1,54 @@
+# OrangePiZero3 StereoDepth 全局配置
+# 最后更新: 2026-02-01
+
+system:
+  mode: "gpu"  # 可选: "gpu", "cpu"
+  debug_level: 2  # 0: TRACE, 1: DEBUG, 2: INFO, 3: WARN, 4: ERROR, 5: CRITICAL
+  log_to_file: false
+  log_file_path: "logs/stereo_depth.log"
+
+gpu:
+  enabled: true
+  vulkan_version: "1.0"
+  enable_validation: false  # 在Mali-G31上必须为false
+  shader_workgroup_size: [16, 16]
+  max_disparity: 64
+  census_window: 9
+  cost_aggregation_window: 5
+  enable_postprocessing: true
+
+camera:
+  width: 640
+  height: 480
+  fps: 30
+  left_device_id: 0
+  right_device_id: 1
+  auto_exposure: true
+  auto_white_balance: true
+
+stereo:
+  algorithm: "wta"  # 赢家通算法
+  min_disparity: 0
+  max_disparity: 64
+  uniqueness_ratio: 15
+  speckle_window_size: 100
+  speckle_range: 32
+
+calibration:
+  auto_calibrate: false
+  calibration_file: "../calibration_results/stereo_calibration.yml"  # 修正路径
+  chessboard_size: [9, 6]  # 内角点数
+  square_size: 0.025  # 棋盘格方块大小（米）
+
+performance:
+  enable_benchmark: true
+  benchmark_iterations: 100
+  enable_profiling: false
+  target_fps: 15
+
+output:
+  save_disparity: true
+  save_depth: true
+  output_format: "png"
+  output_dir: "../images/output"  # 修正路径
+  visualize_results: true

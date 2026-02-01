@@ -1,1 +1,98 @@
+开发日志 - 2026年2月1日
+项目启动日：Vulkan GPU系统基础搭建完成
+1. 项目背景
+项目名称：OrangePiZero3-StereoDepth
+目标平台：OrangePi Zero3 (ARM Cortex-A53, Mali-G31 GPU)
+核心任务：基于Vulkan的GPU立体深度计算系统
+启动日期：2026年2月1日
+
+2. 今日完成工作
+2.1 基础项目结构搭建
+创建了完整的CMake项目结构
+
+建立了模块化目录组织：
+src/vulkan/ - Vulkan核心模块
+src/utils/ - 工具模块（配置、日志）
+config/ - 配置文件目录
+tools/ - 脚本工具目录
+shaders/ - 着色器目录（预留）
+
+2.2 技术选型确认
+Vulkan API: 使用Vulkan C API而非Vulkan-Hpp，避免版本冲突
+内存管理: 放弃VMA（Vulkan Memory Allocator），使用原生Vulkan内存管理
+日志系统: 集成spdlog作为日志框架
+配置管理: 使用yaml-cpp解析YAML配置文件
+图像处理: 预留OpenCV接口（尚未集成）
+
+2.3 核心问题与解决方案
+问题1: Vulkan-Hpp版本冲突
+症状：编译错误"Wrong VK_HEADER_VERSION! (275 == 270)"
+原因：第三方Vulkan-Hpp库版本与系统Vulkan头文件版本不匹配
+解决方案：完全放弃Vulkan-Hpp，改用Vulkan C API
+
+问题2: VMA导致段错误
+症状：程序在Vulkan初始化时出现段错误
+诊断：简单Vulkan测试（无VMA）成功，复杂程序（含VMA）失败
+原因：PanVK驱动（Mali-G31）对VMA所需扩展支持不完整
+解决方案：移除VMA依赖，实现原生Vulkan缓冲区管理
+问题3: PanVK驱动兼容性问题
+症状：警告"panvk is not a conformant Vulkan implementation"
+解决方案：设置环境变量PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1
+额外措施：采用最小化Vulkan初始化策略
+
+2.4 关键技术实现
+Vulkan上下文管理 (VulkanContext类)
+实现Mali-G31专用的保守初始化策略
+自动选择计算队列族
+提供命令缓冲区和缓冲区管理的基础功能
+实现设备等待和资源清理
+配置管理系统
+支持YAML格式的层级配置
+支持从多个路径自动查找配置文件
+提供类型安全的配置值访问接口
+日志系统封装
+基于spdlog的简单封装
+支持多级别日志输出
+统一的日志格式和颜色输出
+
+3. 验证结果
+3.1 成功验证的功能
+✅ Vulkan实例创建
+✅ 物理设备枚举和选择（成功识别Mali-G31）
+✅ 逻辑设备创建
+✅ 计算队列获取
+✅ 命令池和命令缓冲区创建
+✅ 原生Vulkan缓冲区创建（1MB测试缓冲区）
+✅ 资源生命周期管理
+
+3.2 系统信息确认
+检测到2个Vulkan设备：
+Mali-G31 (Vulkan 1.0.305) - 主设备
+llvmpipe (Vulkan 1.4.305) - 软件回退设备
+PanVK驱动状态：panfrost内核模块已加载
+用户权限：用户属于render组
+
+3.3 性能基线
+缓冲区创建时间：< 1ms（1MB缓冲区）
+内存管理：使用主机可见和主机相干内存
+设备初始化时间：约200ms
+
+4. 重要技术决策
+4.1 放弃VMA的原因
+兼容性问题：PanVK驱动对VMA所需扩展支持有限
+复杂度：VMA引入了不必要的复杂性
+可控性：原生Vulkan API提供更好的控制和调试能力
+依赖性：减少第三方依赖，提高项目可移植性
+
+4.2 Mali-G31特定优化
+API版本：强制使用Vulkan 1.0而非1.3
+扩展限制：不启用任何非必需扩展
+验证层：完全禁用验证层
+内存策略：使用简单的线性内存分配
+
+4.3 架构设计原则
+逐步复杂化：从简单功能开始，逐步增加复杂度
+模块化：各功能模块独立，便于测试和替换
+容错设计：提供详细的错误信息和诊断工具
+性能意识：在实现功能的同时考虑性能影响
 
