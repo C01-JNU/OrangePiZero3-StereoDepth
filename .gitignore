@@ -50,3 +50,6 @@ Thumbs.db
 # 本地配置文件
 local_config.yaml
 .env
+
+#第三方库
+third_party/*

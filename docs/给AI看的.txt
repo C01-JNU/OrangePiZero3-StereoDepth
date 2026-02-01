@@ -1,0 +1,97 @@
+先构建基于vulkan的GPU系统
+/third_party里面有一个VulkanMemoryAllocator可以使用
+进行GPU深度计算时使用/images/test里面的图像，图像结构是这样的：
+左眼拍一张640x480的图，右眼拍一张640x480的图，两边都压缩至320x480后左右拼接
+/calibration_results文件夹内有stereo_calibration.yml需要用上
+
+
+## 🔧 GPU硬件与驱动信息
+
+### **GPU型号**
+- **ARM Mali-G31 MP2**
+  - 架构：Bifrost
+  - 核心数：2个着色器核心
+  - 算力：约10.6 GFLOPS（FP32）
+
+### **驱动状态**
+```
+✅ 驱动栈：Panfrost开源驱动（完全验证可用）
+├── 内核模块：panfrost
+├── DRM接口：/dev/dri/renderD128
+├── Vulkan实现：Mesa Panfrost Vulkan驱动
+└── ICD文件：/usr/share/vulkan/icd.d/panfrost_icd.aarch64.json
+```
+
+### **Vulkan支持详情**
+```
+⚠️ 注意版本差异：
+├── Vulkan实例版本：1.3.275（API支持）
+└── 设备实际版本：1.0.305（硬件限制）
+```
+
+### **关键验证结果**
+
+1. **环境变量要求**（必须设置）：
+   ```bash
+   export PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1
+   ```
+
+2. **权限配置**：
+   ```bash
+   # 用户必须属于render组
+   $ groups
+   youruser adm sudo render
+   ```
+
+3. **设备访问路径**：
+   - 计算设备：`/dev/dri/renderD128`
+   - 显示设备：`/dev/dri/card0`、`/dev/dri/card1`
+
+4. **重要限制**：
+   - ❌ **不支持Vulkan校验层**（必须禁用`enableValidation`）
+   - ❌ 仅支持Vulkan 1.0核心API
+   - ⚠️ 内存类型有限（测试中仅发现索引0）
+   - ⚠️ 驱动仍在测试阶段（非完全兼容实现）
+
+### **已确认的兼容性**
+| 组件 | 状态 | 说明 |
+|------|------|------|
+| Vulkan计算队列 | ✅ 可用 | 支持compute queue |
+| 存储缓冲区 | ✅ 可用 | SSBO正常工作 |
+| Uniform缓冲区 | ✅ 可用 | 参数传递正常 |
+| 一次性命令缓冲区 | ✅ 可用 | 数据传输正常 |
+| SPIR-V着色器 | 🟡 待验证 | 预计可用 |
+
+### **性能注意事项**
+
+1. **内存带宽有限**：
+   - 需要优化数据传输
+   - 建议使用暂存缓冲区减少拷贝
+
+2. **计算能力限制**：
+   - 适合轻量级立体匹配算法
+   - 工作组大小需精心设计
+   - 避免过于复杂的着色器逻辑
+
+3. **实时性考虑**：
+   - Mali-G31主要面向嵌入式
+   - 需要针对帧率优化算法
+
+### **当前测试状态**
+根据开发日志，已经成功验证：
+- ✅ Vulkan实例创建
+- ✅ 物理设备选择（Mali-G31）
+- ✅ 逻辑设备创建
+- ✅ 缓冲区管理（存储、Uniform、暂存）
+- ✅ 数据上传/下载
+- ✅ 资源生命周期管理
+
+### **重要结论**
+**OrangePi Zero3的Mali-G31 GPU通过Panfrost开源驱动可以正常工作，但有一些关键限制：**
+
+1. **必须**禁用Vulkan校验层
+2. **必须**使用Vulkan 1.0 API而非1.3
+3. **建议**优化内存访问模式和计算着色器设计
+
+以及:
+当前项目中spdlog是通过apt安装的，其它都放在third_party中
