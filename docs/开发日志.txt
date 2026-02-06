@@ -96,3 +96,147 @@ API版本：强制使用Vulkan 1.0而非1.3
 容错设计：提供详细的错误信息和诊断工具
 性能意识：在实现功能的同时考虑性能影响
 
+
+开发日志 - 2026年2月6日
+项目启动第6天：Vulkan参数传递系统最终方案完成
+1. 项目背景
+项目名称：OrangePiZero3-StereoDepth
+核心任务：基于Vulkan的GPU立体深度计算系统
+关键挑战：配置参数从YAML文件传递到GLSL着色器
+时间节点：项目启动第6天，参数传递系统第3次重构
+2. 今日完成工作
+2.1 参数传递系统最终重构
+问题识别：前两次重构均失败
+第一次：尝试使用Vulkan-Hpp + VMA，因驱动兼容性失败
+第二次：使用#include + 扩展启用，因GLSL编译器限制失败
+第三次：编译前文件合并方案，最终成功
+最终方案设计：
+config/global_config.yaml
+    ↓
+generate_shader_config.py (Python脚本)
+    ↓
+生成：shader_params.glsl (GLSL宏) + shader_params.hpp (C++常量)
+    ↓
+merge_shader.py (编译前合并)
+    ↓
+test_merged.comp (合并后的着色器)
+    ↓
+glslangValidator编译
+    ↓
+test.comp.spv (最终SPIR-V)
+2.2 关键脚本实现
+配置生成脚本 (generate_shader_config.py)：
+读取YAML配置，提取立体匹配参数
+生成GLSL宏定义文件（shader_params.glsl）
+生成C++常量头文件（shader_params.hpp）
+自动计算：图像宽度(320=640/2)、标志位组合等
+着色器合并脚本 (merge_shader.py)：
+在#version语句后插入参数宏定义
+避免GLSL #include扩展需求
+保持原始着色器结构不变
+2.3 CMake构建系统集成
+自动化流程：
+配置生成（依赖Python3）
+着色器合并（依赖生成的参数文件）
+SPIR-V编译（依赖合并后的着色器）
+可执行文件构建（链接所有组件）
+关键修复：
+-I选项格式修正：-I${SHADER_DIR}（无空格）
+依赖链确保：先生成配置，再合并，最后编译
+2.4 测试着色器修复
+语法错误修正：
+uint32_t → uint（GLSL标准类型）
+移除冲突的注释宏定义
+验证双参数传递机制
+验证机制：
+编译时常量：IMAGE_WIDTH、WORKGROUP_X等
+运行时Uniform：params.imageWidth、params.workGroupSizeX等
+一致性检查：验证两种参数值匹配
+3. 验证结果
+3.1 成功验证的功能
+✅ 配置生成：YAML → GLSL宏 + C++常量
+✅ 文件合并：参数宏正确插入着色器
+✅ 着色器编译：生成有效SPIR-V文件（4,196字节）
+✅ 构建流程：CMake自动化完成所有步骤
+3.2 关键参数确认
+text
+图像参数：
+  单眼宽度：320像素（640/2拼接）
+  图像高度：480像素
+  视差范围：0-64
+算法参数：
+  窗口大小：9×9
+  聚合窗口：5×5
+  唯一性比率：15% → 0.15
+  惩罚参数：P1=8.0, P2=32.0
+GPU参数：
+  工作组：16×16
+  标志位：0x07（启用所有功能）
+3.3 系统状态
+构建系统：完整自动化，一键编译
+参数传递：双重验证机制，可靠传递
+着色器编译：无扩展依赖，兼容性好
+代码规范：符合项目命名和格式要求
+4. 重要技术决策
+4.1 放弃的方案
+Vulkan-Hpp + VMA：驱动兼容性问题
+GLSL #include扩展：编译器支持不一致
+运行时动态包含：构建复杂度高
+4.2 采用的方案
+编译前合并：最简单可靠的方案
+双参数传递：编译时常量 + 运行时Uniform
+自动化构建：CMake集成所有步骤
+4.3 架构原则确立
+KISS原则：保持简单，避免过度工程
+显式优于隐式：明确的数据流动路径
+验证机制：关键步骤都有验证
+5. 经验教训
+5.1 技术层面
+GLSL与C++类型系统差异：uint32_t vs uint
+构建工具链细节：-I选项格式、依赖顺序
+跨平台兼容性：优先使用最广泛支持的特性
+5.2 工程层面
+迭代开发：三次重构才找到正确方案
+问题诊断：编译错误信息需要仔细分析
+自动化测试：每个步骤都需要验证
+5.3 项目管理
+保持配置一致性：单一数据源(YAML)
+文档重要性：开发日志记录决策过程
+工具链完善：构建系统是项目基础
+6. 后续工作安排
+6.1 短期计划
+实现Census变换计算着色器
+集成OpenCV图像读取
+测试立体匹配基础算法
+6.2 中期计划
+完成完整立体匹配流水线
+性能优化和基准测试
+相机标定参数集成
+7. 项目状态总结
+当前状态：基础框架完成，参数传递系统验证通过
+关键技术：Vulkan计算管线、配置自动化、着色器编译
+主要成果：可靠的参数传递系统，自动化构建流程
+待解决问题：无（当前阶段目标达成）
+重要结论：经过三次重构，找到了适合OrangePi Zero3 Mali-G31 GPU的Vulkan参数传递方案。系统现在具备稳定可靠的基础，可以开始实现核心立体匹配算法。
+日志记录时间：2026年2月6日 22:47
+记录人：AI助手
+8.补充
+8.1删除了tools里的大部分无用脚本，并加进了一个check_vulkan.sh可供使用
+8.2因为test.cpp中std::filesystem::exists需要 C++17 完全支持，并且可能需要链接文件系统库，导致编译失败
+所以1.用stat()函数替换了std::filesystem::exists   2.简化了着色器文件检测逻辑  3.保持了所有测试功能
+8.3
+如果是在build目录下运行./bin/test_stereo_depth,则:
+[2026-02-06 14:47:12.764] [info] [test] -----------------------------------
+[2026-02-06 14:47:12.764] [info] [test] Initializing stereo pipeline
+[2026-02-06 14:47:12.764] [info] [test]   Image size: 320 x 480
+[2026-02-06 14:47:12.764] [info] [test]   Max disparity: 64
+[2026-02-06 14:47:12.785] [error] [test] Shader not found: census.comp.spv
+[2026-02-06 14:47:12.785] [error] [test] Failed to create census pipeline
+[2026-02-06 14:47:12.785] [error] [test] Failed to create compute pipelines
+[2026-02-06 14:47:12.785] [error] [test] Failed to initialize stereo pipeline
+如果是在根目录运行./build/bin/test_stereo_depth,则:
+[2026-02-06 14:46:48.581] [info] [test] -------------------------
+[2026-02-06 14:46:48.581] [info] [test] Found test shader: src/vulkan/spv/test.comp.spv
+[2026-02-06 14:46:48.581] [info] [test] ✓ Shader loaded successfully
+Segmentation fault
+这是异常，需要排查

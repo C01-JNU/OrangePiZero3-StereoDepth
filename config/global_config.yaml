@@ -1,54 +1,115 @@
-# OrangePiZero3 StereoDepth 全局配置
-# 最后更新: 2026-02-01
+# OrangePiZero3-StereoDepth 全局配置
+# 合并版本：结合原有配置和新框架需求
+# 最后更新: 2026-02-06
 
+# 系统配置
 system:
-  mode: "gpu"  # 可选: "gpu", "cpu"
-  debug_level: 2  # 0: TRACE, 1: DEBUG, 2: INFO, 3: WARN, 4: ERROR, 5: CRITICAL
+  mode: "gpu"           # 可选: "gpu", "cpu" (当前只实现GPU)
+  debug_level: 2        # 0: TRACE, 1: DEBUG, 2: INFO, 3: WARN, 4: ERROR, 5: CRITICAL
   log_to_file: false
   log_file_path: "logs/stereo_depth.log"
 
+# GPU配置
 gpu:
   enabled: true
-  vulkan_version: "1.0"
-  enable_validation: false  # 在Mali-G31上必须为false
-  shader_workgroup_size: [16, 16]
-  max_disparity: 64
-  census_window: 9
-  cost_aggregation_window: 5
-  enable_postprocessing: true
+  vulkan_version: "1.0"          # Mali-G31只支持Vulkan 1.0
+  enable_validation: false        # 在Mali-G31上必须为false
+  shader_workgroup_size: [16, 16] # 工作组大小
+  max_memory_mb: 256              # 最大GPU内存使用(MB)
+  
+  # 性能优化
+  use_async_transfer: true        # 使用异步传输
+  staging_buffer_size: 16         # 暂存缓冲区大小(MB)
 
+# 摄像头配置
 camera:
   width: 640
   height: 480
   fps: 30
-  left_device_id: 0
-  right_device_id: 1
+  # 注意：设备ID由摄像头驱动API提供，这里不指定具体路径
   auto_exposure: true
   auto_white_balance: true
+  
+  # 图像预处理
+  denoise_strength: 0.5           # 去噪强度(0.0-1.0)
 
+# 立体匹配算法配置
 stereo:
-  algorithm: "wta"  # 赢家通算法
-  min_disparity: 0
-  max_disparity: 64
-  uniqueness_ratio: 15
-  speckle_window_size: 100
-  speckle_range: 32
+  # 图像参数
+  image_width: 320                # 拼接后单眼图像宽度
+  image_height: 480               # 图像高度
+  max_disparity: 64               # 最大视差
+  
+  # 算法参数
+  min_disparity: 0                # 最小视差
+  uniqueness_ratio: 15            # 唯一性比率（百分比）
+  window_size: 9                  # Census变换窗口大小
+  cost_aggregation_window: 5      # 代价聚合窗口大小
+  penalty_p1: 8.0                 # P1惩罚（小视差变化）
+  penalty_p2: 32.0                # P2惩罚（大视差变化）
+  
+  # 算法选择
+  algorithm: "wta"                # 赢家通吃算法
+  use_census: true                # 使用Census变换
+  use_median_filter: true         # 使用中值滤波
+  enable_postprocessing: true     # 启用后处理
+  
+  # 后处理参数
+  speckle_window_size: 100        # 斑点窗口大小
+  speckle_range: 32               # 斑点范围
+  median_filter_size: 3           # 中值滤波器大小
 
+# 标定配置
 calibration:
-  auto_calibrate: false
-  calibration_file: "../calibration_results/stereo_calibration.yml"  # 修正路径
-  chessboard_size: [9, 6]  # 内角点数
-  square_size: 0.025  # 棋盘格方块大小（米）
+  auto_calibrate: false           # 是否自动标定
+  calibration_file: "calibration_results/stereo_calibration.yml"
+  use_calibration: true           # 是否使用标定参数
+  rectify_images: true            # 是否校正图像
+  
+  # 标定板参数
+  chessboard_size: [9, 6]         # 内角点数 (宽度, 高度)
+  board_width: 9                  # 棋盘格宽度（角点数量）
+  board_height: 6                 # 棋盘格高度（角点数量）
+  square_size: 0.15               # 棋盘格方块大小（米） - 15cm
 
+# 性能配置
 performance:
-  enable_benchmark: true
-  benchmark_iterations: 100
-  enable_profiling: false
-  target_fps: 15
+  enable_benchmark: true          # 启用性能基准测试
+  benchmark_iterations: 100       # 基准测试迭代次数
+  enable_profiling: false         # 启用性能分析
+  target_fps: 15                  # 目标帧率
+  log_fps: true                   # 记录帧率
+  log_memory: true                # 记录内存使用
+  update_interval_ms: 1000        # 监控更新间隔(毫秒)
+  profile_file: "logs/performance.csv"
 
+# 输出配置
 output:
-  save_disparity: true
-  save_depth: true
-  output_format: "png"
-  output_dir: "../images/output"  # 修正路径
-  visualize_results: true
+  save_disparity: true            # 保存视差图
+  save_depth: true                # 保存深度图
+  output_format: "png"            # 输出格式
+  output_dir: "images/output"     # 输出目录
+  visualize_results: true         # 可视化结果
+  
+  # 测试模式
+  use_test_images: true           # 使用测试图像
+  test_image_dir: "images/test"   # 测试图像目录
+  calibration_dir: "images/calibration" # 标定图像目录
+
+# ROS2配置 (预留，当前不启用)
+ros2:
+  enabled: false                  # 是否启用ROS2
+  node_name: "stereo_depth_node"
+  namespace: "stereo"
+  
+  # 话题配置
+  topics:
+    left_image: "/camera/left/image_raw"
+    right_image: "/camera/right/image_raw"
+    disparity: "/stereo/disparity"
+    depth: "/stereo/depth"
+    pointcloud: "/stereo/points"
+  
+  # QoS配置
+  qos_depth: 10                   # 队列深度
+  qos_reliability: "best_effort"  # 可靠性: best_effort, reliable

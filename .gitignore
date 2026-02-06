@@ -18,6 +18,8 @@ lib/
 *.tmp
 *.log
 logs/
+src/vulkan/spv/*
+src/vulkan/generated/*
 
 # 图像文件（使用通配符匹配所有图像格式）
 images/**/*.png

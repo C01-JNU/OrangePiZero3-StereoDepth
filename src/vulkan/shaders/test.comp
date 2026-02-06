@@ -1,0 +1,140 @@
+#version 450
+// 测试计算着色器 - 修复版
+// 编译时会将shader_params.glsl的内容自动插入到这里
+
+// 注意：所有的宏定义（IMAGE_WIDTH, WORKGROUP_X等）都会在编译前插入
+
+layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y, local_size_z = 1) in;
+
+// Uniform缓冲区定义（使用配置参数）
+layout(std140, binding = 0) uniform Parameters {
+    uint imageWidth;
+    uint imageHeight;
+    uint maxDisparity;
+    uint minDisparity;
+    
+    uint windowSize;
+    uint aggregationWindow;
+    float uniquenessRatio;
+    float penaltyP1;
+    
+    float penaltyP2;
+    uint workGroupSizeX;
+    uint workGroupSizeY;
+    uint flags;
+    
+    uint speckleWindowSize;
+    uint speckleRange;
+    uint medianFilterSize;
+    
+    uint padding;
+} params;
+
+// 输入缓冲区
+layout(binding = 1) readonly buffer InputBuffer {
+    float data[];
+} inputBuffer;
+
+// 输出缓冲区
+layout(binding = 2) writeonly buffer OutputBuffer {
+    float data[];
+} outputBuffer;
+
+// 调试信息缓冲区
+layout(binding = 3) writeonly buffer DebugBuffer {
+    uint info[];  // 注意：GLSL中没有uint32_t，只有uint
+} debugBuffer;
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    
+    // 使用编译时常量进行边界检查
+    if (x >= IMAGE_WIDTH || y >= IMAGE_HEIGHT) {
+        return;
+    }
+    
+    uint pixelIndex = GET_PIXEL_INDEX(x, y);
+    
+    // 验证配置参数是否正确传递
+    bool configValid = true;
+    
+    // 检查编译时常量与Uniform值是否匹配
+    if (IMAGE_WIDTH != params.imageWidth ||
+        IMAGE_HEIGHT != params.imageHeight ||
+        MAX_DISPARITY != params.maxDisparity) {
+        configValid = false;
+    }
+    
+    // 读取输入值
+    float inputValue = 0.0;
+    if (pixelIndex < IMAGE_WIDTH * IMAGE_HEIGHT) {
+        inputValue = inputBuffer.data[pixelIndex];
+    }
+    
+    // 基本计算
+    float result = inputValue * 2.0;
+    
+    // 使用配置参数
+    result += float(params.windowSize) * 0.01;
+    result += params.penaltyP1 * 0.001;
+    result += params.penaltyP2 * 0.0001;
+    
+    // 根据视差范围调整
+    if (params.maxDisparity > 0) {
+        result += float(x % params.maxDisparity) * 0.01;
+    }
+    
+    // 使用唯一性比率
+    result *= (1.0 + params.uniquenessRatio);
+    
+    // 写入输出
+    outputBuffer.data[pixelIndex] = result;
+    
+    // 第一个像素记录验证信息
+    if (pixelIndex == 0) {
+        // 记录配置参数用于验证
+        outputBuffer.data[0] = float(params.imageWidth);
+        outputBuffer.data[1] = float(params.imageHeight);
+        outputBuffer.data[2] = float(params.maxDisparity);
+        outputBuffer.data[3] = float(params.windowSize);
+        outputBuffer.data[4] = params.uniquenessRatio;
+        outputBuffer.data[5] = params.penaltyP1;
+        outputBuffer.data[6] = params.penaltyP2;
+        outputBuffer.data[7] = float(params.flags);
+        
+        // 验证结果
+        outputBuffer.data[8] = configValid ? 1.0 : 0.0;
+        
+        // 记录编译时常量（用于比较）
+        outputBuffer.data[9] = float(IMAGE_WIDTH);
+        outputBuffer.data[10] = float(IMAGE_HEIGHT);
+        outputBuffer.data[11] = float(MAX_DISPARITY);
+        
+        // 调试信息
+        debugBuffer.info[0] = params.imageWidth;
+        debugBuffer.info[1] = params.imageHeight;
+        debugBuffer.info[2] = params.maxDisparity;
+        debugBuffer.info[3] = params.flags;
+        debugBuffer.info[4] = gl_NumWorkGroups.x;
+        debugBuffer.info[5] = gl_NumWorkGroups.y;
+        debugBuffer.info[6] = gl_WorkGroupSize.x;
+        debugBuffer.info[7] = gl_WorkGroupSize.y;
+    }
+    
+    // 使用标志位控制不同功能
+    if (IS_FLAG_SET(FLAG_USE_CENSUS)) {
+        // Census变换相关计算
+        outputBuffer.data[pixelIndex] += 0.5;
+    }
+    
+    if (IS_FLAG_SET(FLAG_USE_POSTPROCESSING)) {
+        // 后处理相关计算
+        outputBuffer.data[pixelIndex] += 0.3;
+    }
+    
+    if (IS_FLAG_SET(FLAG_USE_MEDIAN_FILTER)) {
+        // 中值滤波相关计算
+        outputBuffer.data[pixelIndex] += 0.2;
+    }
+}
