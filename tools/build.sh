@@ -45,13 +45,6 @@ make -j$(nproc)
 if [ $? -eq 0 ]; then
     echo ""
     echo "=== 构建成功！ ==="
-    echo "可执行文件: $(pwd)/stereo_depth"
-    echo ""
-    echo "运行以下命令测试："
-    echo "cd build && ./stereo_depth"
-    echo "或"
-    echo "./tools/run.sh"
-    echo ""
     echo "重要提示：确保已设置环境变量："
     echo "export PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1"
 else

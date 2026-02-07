@@ -150,6 +150,13 @@ private:
     bool loadShader(ComputePipeline& pipeline, const std::string& shaderName);
     
     /**
+     * @brief 检查着色器文件是否存在
+     * @param shaderName 着色器文件名
+     * @return 是否存在
+     */
+    bool checkShaderExists(const std::string& shaderName);
+    
+    /**
      * @brief 创建描述符集布局
      */
     bool createDescriptorSetLayouts();

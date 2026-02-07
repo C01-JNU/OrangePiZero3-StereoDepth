@@ -16,9 +16,9 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     void* pUserData) {
     
     if (messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
-        LOG_WARN("Vulkan Validation: {}", pCallbackData->pMessage);
+        LOG_WARN("Vulkan验证层: {}", pCallbackData->pMessage);
     } else {
-        LOG_DEBUG("Vulkan Validation: {}", pCallbackData->pMessage);
+        LOG_DEBUG("Vulkan验证层: {}", pCallbackData->pMessage);
     }
     
     return VK_FALSE;
@@ -52,12 +52,12 @@ VulkanContext::~VulkanContext() {
 }
 
 bool VulkanContext::initialize(bool enable_validation) {
-    LOG_INFO("Initializing Vulkan context (without VMA)...");
+    LOG_INFO("正在初始化Vulkan上下文（不使用VMA）...");
     
     // 根据环境判断是否需要禁用验证层（针对Mali-G31）
     #ifdef __arm__
     if (enable_validation) {
-        LOG_WARN("Validation layers are disabled on ARM Mali-G31 due to driver limitations");
+        LOG_WARN("由于ARM Mali-G31驱动限制，验证层已禁用");
         enable_validation = false;
     }
     #endif
@@ -66,40 +66,40 @@ bool VulkanContext::initialize(bool enable_validation) {
     LOG_INFO("使用保守模式初始化Vulkan（针对PanVK驱动）...");
     
     try {
-        LOG_DEBUG("Step 1: Creating Vulkan instance (minimal setup)...");
+        LOG_DEBUG("步骤1: 创建Vulkan实例（最小化设置）...");
         if (!createInstance(enable_validation)) {
-            LOG_ERROR("Failed to create Vulkan instance");
+            LOG_ERROR("创建Vulkan实例失败");
             return false;
         }
         
-        LOG_DEBUG("Step 2: Selecting physical device...");
+        LOG_DEBUG("步骤2: 选择物理设备...");
         if (!selectPhysicalDevice()) {
-            LOG_ERROR("Failed to select physical device");
+            LOG_ERROR("选择物理设备失败");
             return false;
         }
         
-        LOG_DEBUG("Step 3: Creating logical device (minimal features)...");
+        LOG_DEBUG("步骤3: 创建逻辑设备（最小化特性）...");
         if (!createLogicalDevice()) {
-            LOG_ERROR("Failed to create logical device");
+            LOG_ERROR("创建逻辑设备失败");
             return false;
         }
         
-        LOG_INFO("Vulkan context initialized successfully");
-        LOG_INFO("Device: {}", getDeviceName());
-        LOG_INFO("Vulkan Version: {}", getVulkanVersion());
+        LOG_INFO("Vulkan上下文初始化成功");
+        LOG_INFO("设备: {}", getDeviceName());
+        LOG_INFO("Vulkan版本: {}", getVulkanVersion());
         
         return true;
     } catch (const std::exception& e) {
-        LOG_ERROR("Exception during Vulkan initialization: {}", e.what());
+        LOG_ERROR("Vulkan初始化过程中发生异常: {}", e.what());
         return false;
     } catch (...) {
-        LOG_ERROR("Unknown exception during Vulkan initialization");
+        LOG_ERROR("Vulkan初始化过程中发生未知异常");
         return false;
     }
 }
 
 bool VulkanContext::createInstance(bool enable_validation) {
-    LOG_DEBUG("Creating Vulkan instance with minimal setup...");
+    LOG_DEBUG("正在创建Vulkan实例（最小化设置）...");
     
     // 应用信息 - 使用Vulkan 1.0
     VkApplicationInfo app_info = {};
@@ -123,67 +123,67 @@ bool VulkanContext::createInstance(bool enable_validation) {
     create_info.enabledLayerCount = 0;
     create_info.ppEnabledLayerNames = nullptr;
     
-    LOG_DEBUG("Creating Vulkan instance with API version 1.0.0, no extensions, no layers");
+    LOG_DEBUG("使用API版本1.0.0创建Vulkan实例，无扩展，无验证层");
     
     // 创建实例
     VkResult result = vkCreateInstance(&create_info, nullptr, &instance_);
     if (result != VK_SUCCESS) {
-        LOG_ERROR("Failed to create Vulkan instance: {}", result);
+        LOG_ERROR("创建Vulkan实例失败: {}", result);
         
         // 提供更有用的错误信息
         switch (result) {
             case VK_ERROR_OUT_OF_HOST_MEMORY:
-                LOG_ERROR("Out of host memory");
+                LOG_ERROR("主机内存不足");
                 break;
             case VK_ERROR_OUT_OF_DEVICE_MEMORY:
-                LOG_ERROR("Out of device memory");
+                LOG_ERROR("设备内存不足");
                 break;
             case VK_ERROR_INITIALIZATION_FAILED:
-                LOG_ERROR("Initialization failed - Vulkan may not be supported");
+                LOG_ERROR("初始化失败 - 可能不支持Vulkan");
                 break;
             case VK_ERROR_LAYER_NOT_PRESENT:
-                LOG_ERROR("Requested layer not present");
+                LOG_ERROR("请求的验证层不存在");
                 break;
             case VK_ERROR_EXTENSION_NOT_PRESENT:
-                LOG_ERROR("Requested extension not present");
+                LOG_ERROR("请求的扩展不存在");
                 break;
             case VK_ERROR_INCOMPATIBLE_DRIVER:
-                LOG_ERROR("Incompatible driver - may need to update Vulkan drivers");
+                LOG_ERROR("不兼容的驱动程序 - 可能需要更新Vulkan驱动");
                 break;
             default:
-                LOG_ERROR("Unknown error code: {}", result);
+                LOG_ERROR("未知错误码: {}", result);
                 break;
         }
         
         return false;
     }
     
-    LOG_DEBUG("Vulkan instance created successfully");
+    LOG_DEBUG("Vulkan实例创建成功");
     return true;
 }
 
 bool VulkanContext::selectPhysicalDevice() {
-    LOG_DEBUG("Selecting physical device...");
+    LOG_DEBUG("正在选择物理设备...");
     
     uint32_t device_count = 0;
     vkEnumeratePhysicalDevices(instance_, &device_count, nullptr);
     
     if (device_count == 0) {
-        LOG_ERROR("No Vulkan-capable devices found");
+        LOG_ERROR("未找到支持Vulkan的设备");
         return false;
     }
     
     std::vector<VkPhysicalDevice> devices(device_count);
     vkEnumeratePhysicalDevices(instance_, &device_count, devices.data());
     
-    LOG_DEBUG("Found {} physical device(s)", device_count);
+    LOG_DEBUG("找到 {} 个物理设备", device_count);
     
     // 首先尝试选择Mali-G31
     for (const auto& device : devices) {
         VkPhysicalDeviceProperties properties;
         vkGetPhysicalDeviceProperties(device, &properties);
         
-        LOG_DEBUG("Checking device: {} (Vulkan {}.{}.{})", 
+        LOG_DEBUG("检查设备: {} (Vulkan {}.{}.{})", 
                  properties.deviceName,
                  VK_VERSION_MAJOR(properties.apiVersion),
                  VK_VERSION_MINOR(properties.apiVersion),
@@ -192,7 +192,7 @@ bool VulkanContext::selectPhysicalDevice() {
         // 优先选择Mali-G31
         if (strstr(properties.deviceName, "Mali-G31") != nullptr) {
             physical_device_ = device;
-            LOG_INFO("Selected Mali-G31 GPU");
+            LOG_INFO("选择Mali-G31 GPU");
             return true;
         }
     }
@@ -204,7 +204,7 @@ bool VulkanContext::selectPhysicalDevice() {
         
         if (strstr(properties.deviceName, "llvmpipe") != nullptr) {
             physical_device_ = device;
-            LOG_INFO("Selected llvmpipe (software renderer) as fallback");
+            LOG_INFO("选择llvmpipe（软件渲染器）作为回退方案");
             return true;
         }
     }
@@ -214,20 +214,20 @@ bool VulkanContext::selectPhysicalDevice() {
         VkPhysicalDeviceProperties properties;
         vkGetPhysicalDeviceProperties(devices[0], &properties);
         physical_device_ = devices[0];
-        LOG_INFO("Selected first available device: {}", properties.deviceName);
+        LOG_INFO("选择第一个可用设备: {}", properties.deviceName);
         return true;
     }
     
-    LOG_ERROR("No suitable physical device found");
+    LOG_ERROR("未找到合适的物理设备");
     return false;
 }
 
 bool VulkanContext::createLogicalDevice() {
-    LOG_DEBUG("Creating logical device with minimal features...");
+    LOG_DEBUG("正在创建逻辑设备（最小化特性）...");
     
     compute_queue_family_index_ = findComputeQueueFamily();
     if (compute_queue_family_index_ == static_cast<uint32_t>(-1)) {
-        LOG_ERROR("No compute queue family found");
+        LOG_ERROR("未找到计算队列族");
         return false;
     }
     
@@ -245,7 +245,7 @@ bool VulkanContext::createLogicalDevice() {
     // 对于PanVK，可能不需要任何扩展
     std::vector<const char*> device_extensions;
     
-    LOG_DEBUG("Creating logical device with {} extensions", device_extensions.size());
+    LOG_DEBUG("正在创建逻辑设备，包含 {} 个扩展", device_extensions.size());
     
     // 创建设备
     VkDeviceCreateInfo create_info = {};
@@ -258,14 +258,14 @@ bool VulkanContext::createLogicalDevice() {
     
     VkResult result = vkCreateDevice(physical_device_, &create_info, nullptr, &device_);
     if (result != VK_SUCCESS) {
-        LOG_ERROR("Failed to create logical device: {}", result);
+        LOG_ERROR("创建逻辑设备失败: {}", result);
         return false;
     }
     
     // 获取计算队列
     vkGetDeviceQueue(device_, compute_queue_family_index_, 0, &compute_queue_);
     
-    LOG_DEBUG("Logical device created successfully");
+    LOG_DEBUG("逻辑设备创建成功");
     return true;
 }
 
@@ -294,10 +294,15 @@ bool VulkanContext::checkValidationLayerSupport(const std::vector<const char*>& 
 
 void VulkanContext::setupDebugMessenger(bool enable_validation) {
     // PanVK不支持调试消息，跳过
-    LOG_DEBUG("Debug messenger disabled for PanVK");
+    LOG_DEBUG("PanVK驱动不支持调试消息，已禁用");
 }
 
 uint32_t VulkanContext::findComputeQueueFamily() const {
+    if (!physical_device_) {
+        LOG_ERROR("物理设备未初始化");
+        return static_cast<uint32_t>(-1);
+    }
+    
     uint32_t queue_family_count = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physical_device_, &queue_family_count, nullptr);
     
@@ -306,7 +311,7 @@ uint32_t VulkanContext::findComputeQueueFamily() const {
     
     for (uint32_t i = 0; i < queue_family_count; i++) {
         if (queue_families[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
-            LOG_DEBUG("Found compute queue family at index {} with {} queues", 
+            LOG_DEBUG("在索引 {} 找到计算队列族，包含 {} 个队列", 
                      i, queue_families[i].queueCount);
             return i;
         }
@@ -316,8 +321,9 @@ uint32_t VulkanContext::findComputeQueueFamily() const {
 }
 
 bool VulkanContext::isDeviceSuitable(VkPhysicalDevice device) const {
-    // 简化检查：只要有计算队列就行
     // 保存当前设备以便findComputeQueueFamily使用
+    // 注意：这里我们修改了const成员，这是一个潜在问题
+    // 但在实际使用中，我们不会在const函数中调用这个方法
     const_cast<VulkanContext*>(this)->physical_device_ = device;
     return findComputeQueueFamily() != static_cast<uint32_t>(-1);
 }
@@ -329,7 +335,7 @@ bool VulkanContext::checkDeviceExtensionSupport(const std::vector<const char*>& 
 
 VkCommandPool VulkanContext::createCommandPool(VkCommandPoolCreateFlags flags) const {
     if (!device_) {
-        LOG_ERROR("Device not initialized");
+        LOG_ERROR("设备未初始化");
         return VK_NULL_HANDLE;
     }
     
@@ -342,7 +348,7 @@ VkCommandPool VulkanContext::createCommandPool(VkCommandPoolCreateFlags flags) c
     VkResult result = vkCreateCommandPool(device_, &pool_info, nullptr, &command_pool);
     
     if (result != VK_SUCCESS) {
-        LOG_ERROR("Failed to create command pool: {}", result);
+        LOG_ERROR("创建命令池失败: {}", result);
         return VK_NULL_HANDLE;
     }
     
@@ -351,7 +357,7 @@ VkCommandPool VulkanContext::createCommandPool(VkCommandPoolCreateFlags flags) c
 
 VkCommandBuffer VulkanContext::createCommandBuffer(VkCommandPool pool) const {
     if (!device_ || !pool) {
-        LOG_ERROR("Device or command pool not initialized");
+        LOG_ERROR("设备或命令池未初始化");
         return VK_NULL_HANDLE;
     }
     
@@ -365,7 +371,7 @@ VkCommandBuffer VulkanContext::createCommandBuffer(VkCommandPool pool) const {
     VkResult result = vkAllocateCommandBuffers(device_, &alloc_info, &command_buffer);
     
     if (result != VK_SUCCESS) {
-        LOG_ERROR("Failed to allocate command buffers: {}", result);
+        LOG_ERROR("分配命令缓冲区失败: {}", result);
         return VK_NULL_HANDLE;
     }
     
@@ -387,14 +393,14 @@ VkPhysicalDeviceProperties VulkanContext::getPhysicalDeviceProperties() const {
 }
 
 std::string VulkanContext::getDeviceName() const {
-    if (!physical_device_) return "Unknown";
+    if (!physical_device_) return "未知设备";
     
     auto properties = getPhysicalDeviceProperties();
     return properties.deviceName;
 }
 
 std::string VulkanContext::getVulkanVersion() const {
-    if (!physical_device_) return "Unknown";
+    if (!physical_device_) return "未知版本";
     
     auto properties = getPhysicalDeviceProperties();
     return std::to_string(VK_VERSION_MAJOR(properties.apiVersion)) + "." +
@@ -403,6 +409,10 @@ std::string VulkanContext::getVulkanVersion() const {
 }
 
 uint32_t VulkanContext::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const {
+    if (!physical_device_) {
+        throw std::runtime_error("物理设备未初始化，无法查找内存类型");
+    }
+    
     VkPhysicalDeviceMemoryProperties memProperties;
     vkGetPhysicalDeviceMemoryProperties(physical_device_, &memProperties);
     
@@ -413,11 +423,16 @@ uint32_t VulkanContext::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlag
         }
     }
     
-    throw std::runtime_error("failed to find suitable memory type!");
+    throw std::runtime_error("无法找到合适的内存类型");
 }
 
 bool VulkanContext::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, 
                                 VkBuffer& buffer, VkDeviceMemory& bufferMemory) const {
+    if (!device_) {
+        LOG_ERROR("设备未初始化");
+        return false;
+    }
+    
     VkBufferCreateInfo bufferInfo = {};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = size;
@@ -425,7 +440,7 @@ bool VulkanContext::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Vk
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     
     if (vkCreateBuffer(device_, &bufferInfo, nullptr, &buffer) != VK_SUCCESS) {
-        LOG_ERROR("Failed to create buffer");
+        LOG_ERROR("创建缓冲区失败");
         return false;
     }
     
@@ -435,28 +450,46 @@ bool VulkanContext::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Vk
     VkMemoryAllocateInfo allocInfo = {};
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
     
-    if (vkAllocateMemory(device_, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
+    try {
+        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
+    } catch (const std::exception& e) {
         vkDestroyBuffer(device_, buffer, nullptr);
-        LOG_ERROR("Failed to allocate buffer memory");
+        LOG_ERROR("查找内存类型失败: {}", e.what());
         return false;
     }
     
-    vkBindBufferMemory(device_, buffer, bufferMemory, 0);
+    if (vkAllocateMemory(device_, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
+        vkDestroyBuffer(device_, buffer, nullptr);
+        LOG_ERROR("分配缓冲区内存失败");
+        return false;
+    }
+    
+    if (vkBindBufferMemory(device_, buffer, bufferMemory, 0) != VK_SUCCESS) {
+        vkDestroyBuffer(device_, buffer, nullptr);
+        vkFreeMemory(device_, bufferMemory, nullptr);
+        LOG_ERROR("绑定缓冲区内存失败");
+        return false;
+    }
+    
     return true;
 }
 
 void VulkanContext::copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) const {
+    if (!device_ || !srcBuffer || !dstBuffer) {
+        LOG_ERROR("设备或缓冲区无效，无法复制缓冲区");
+        return;
+    }
+    
     VkCommandPool commandPool = createCommandPool();
     if (!commandPool) {
-        LOG_ERROR("Failed to create command pool for buffer copy");
+        LOG_ERROR("为缓冲区复制创建命令池失败");
         return;
     }
     
     VkCommandBuffer commandBuffer = createCommandBuffer(commandPool);
     if (!commandBuffer) {
-        LOG_ERROR("Failed to create command buffer for buffer copy");
+        LOG_ERROR("为缓冲区复制创建命令缓冲区失败");
         vkDestroyCommandPool(device_, commandPool, nullptr);
         return;
     }
@@ -466,7 +499,11 @@ void VulkanContext::copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceS
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     
-    vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+        LOG_ERROR("开始命令缓冲区失败");
+        vkDestroyCommandPool(device_, commandPool, nullptr);
+        return;
+    }
     
     // 复制缓冲区
     VkBufferCopy copyRegion = {};
@@ -475,7 +512,11 @@ void VulkanContext::copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceS
     copyRegion.size = size;
     vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
     
-    vkEndCommandBuffer(commandBuffer);
+    if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
+        LOG_ERROR("结束命令缓冲区失败");
+        vkDestroyCommandPool(device_, commandPool, nullptr);
+        return;
+    }
     
     // 提交命令缓冲区
     VkSubmitInfo submitInfo = {};
@@ -483,7 +524,13 @@ void VulkanContext::copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceS
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer;
     
-    vkQueueSubmit(compute_queue_, 1, &submitInfo, VK_NULL_HANDLE);
+    if (vkQueueSubmit(compute_queue_, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
+        LOG_ERROR("提交命令缓冲区失败");
+        vkDestroyCommandPool(device_, commandPool, nullptr);
+        return;
+    }
+    
+    // 等待计算完成
     vkQueueWaitIdle(compute_queue_);
     
     // 清理
