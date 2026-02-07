@@ -162,8 +162,9 @@ bool StereoPipeline::setLeftImage(const uint8_t* data) {
         return false;
     }
     
-    size_t imageSize = m_imageWidth * m_imageHeight;
-    return m_leftImageBuffer->copyToBuffer(data, imageSize);
+    size_t imageBytes = static_cast<size_t>(m_imageWidth) * static_cast<size_t>(m_imageHeight) * sizeof(uint8_t);
+    LOG_DEBUG("设置左图像数据: {} 字节", imageBytes);
+    return m_leftImageBuffer->copyToBuffer(data, imageBytes);
 }
 
 bool StereoPipeline::setRightImage(const uint8_t* data) {
@@ -172,8 +173,9 @@ bool StereoPipeline::setRightImage(const uint8_t* data) {
         return false;
     }
     
-    size_t imageSize = m_imageWidth * m_imageHeight;
-    return m_rightImageBuffer->copyToBuffer(data, imageSize);
+    size_t imageBytes = static_cast<size_t>(m_imageWidth) * static_cast<size_t>(m_imageHeight) * sizeof(uint8_t);
+    LOG_DEBUG("设置右图像数据: {} 字节", imageBytes);
+    return m_rightImageBuffer->copyToBuffer(data, imageBytes);
 }
 
 bool StereoPipeline::compute() {
@@ -245,7 +247,7 @@ bool StereoPipeline::getDisparityMap(uint16_t* output) {
         return false;
     }
     
-    size_t disparitySize = m_imageWidth * m_imageHeight * sizeof(uint16_t);
+    size_t disparitySize = static_cast<size_t>(m_imageWidth) * static_cast<size_t>(m_imageHeight) * sizeof(uint16_t);
     return m_disparityBuffer->copyFromBuffer(output, disparitySize);
 }
 
@@ -278,61 +280,87 @@ bool StereoPipeline::getIntermediateResult(uint32_t bufferIndex, void* output, s
 }
 
 bool StereoPipeline::createBuffers() {
-    size_t imageSize = m_imageWidth * m_imageHeight;
-    size_t costVolumeSize = m_imageWidth * m_imageHeight * m_maxDisparity * sizeof(uint16_t);
-    size_t disparitySize = m_imageWidth * m_imageHeight * sizeof(uint16_t);
+    // 计算像素数（不是字节数）
+    size_t pixelCount = static_cast<size_t>(m_imageWidth) * static_cast<size_t>(m_imageHeight);
+    
+    // 计算字节数（显式转换）
+    size_t imageBytes = pixelCount * sizeof(uint8_t);      // 图像：8位灰度 = 1字节/像素
+    size_t costVolumeBytes = pixelCount * static_cast<size_t>(m_maxDisparity) * sizeof(uint16_t);  // 代价体：16位/元素
+    size_t disparityBytes = pixelCount * sizeof(uint16_t); // 视差图：16位/像素
+    size_t tempBufferBytes = pixelCount * sizeof(uint32_t); // 临时缓冲区：32位/像素
+    
+    LOG_INFO("缓冲区大小计算 ({}x{} 图像):", m_imageWidth, m_imageHeight);
+    LOG_INFO("  像素数: {}", pixelCount);
+    LOG_INFO("  图像缓冲区: {} 字节 ({} KB)", 
+             imageBytes, imageBytes/1024);
+    LOG_INFO("  代价体缓冲区: {} 字节 ({} MB)", 
+             costVolumeBytes, costVolumeBytes/(1024*1024));
+    LOG_INFO("  视差图缓冲区: {} 字节 ({} KB)", 
+             disparityBytes, disparityBytes/1024);
+    LOG_INFO("  临时缓冲区: {} 字节 ({} KB)", 
+             tempBufferBytes, tempBufferBytes/1024);
     
     try {
-        // 左图像缓冲区
+        // 左图像缓冲区（8位灰度，每个像素1字节）
         m_leftImageBuffer = std::make_unique<BufferManager>(m_context);
-        if (!m_leftImageBuffer->createStorageBuffer(imageSize)) {
-            LOG_ERROR("创建左图像缓冲区失败");
+        if (!m_leftImageBuffer->createStorageBuffer(imageBytes)) {
+            LOG_ERROR("创建左图像缓冲区失败 ({} 字节)", imageBytes);
             return false;
         }
+        LOG_DEBUG("左图像缓冲区创建成功: {} 字节", m_leftImageBuffer->getSize());
         
         // 右图像缓冲区
         m_rightImageBuffer = std::make_unique<BufferManager>(m_context);
-        if (!m_rightImageBuffer->createStorageBuffer(imageSize)) {
-            LOG_ERROR("创建右图像缓冲区失败");
+        if (!m_rightImageBuffer->createStorageBuffer(imageBytes)) {
+            LOG_ERROR("创建右图像缓冲区失败 ({} 字节)", imageBytes);
             return false;
         }
+        LOG_DEBUG("右图像缓冲区创建成功: {} 字节", m_rightImageBuffer->getSize());
         
-        // 代价体缓冲区
+        // 代价体缓冲区（16位元素）
         m_costVolumeBuffer = std::make_unique<BufferManager>(m_context);
-        if (!m_costVolumeBuffer->createStorageBuffer(costVolumeSize)) {
-            LOG_ERROR("创建代价体缓冲区失败");
+        if (!m_costVolumeBuffer->createStorageBuffer(costVolumeBytes)) {
+            LOG_ERROR("创建代价体缓冲区失败 ({} 字节)", costVolumeBytes);
             return false;
         }
+        LOG_DEBUG("代价体缓冲区创建成功: {} 字节", m_costVolumeBuffer->getSize());
         
-        // 视差图缓冲区
+        // 视差图缓冲区（16位像素）
         m_disparityBuffer = std::make_unique<BufferManager>(m_context);
-        if (!m_disparityBuffer->createStorageBuffer(disparitySize)) {
-            LOG_ERROR("创建视差图缓冲区失败");
+        if (!m_disparityBuffer->createStorageBuffer(disparityBytes)) {
+            LOG_ERROR("创建视差图缓冲区失败 ({} 字节)", disparityBytes);
             return false;
         }
+        LOG_DEBUG("视差图缓冲区创建成功: {} 字节", m_disparityBuffer->getSize());
         
-        // 临时缓冲区1（用于中间计算）
+        // 临时缓冲区1（32位中间结果）
         m_tempBuffer1 = std::make_unique<BufferManager>(m_context);
-        if (!m_tempBuffer1->createStorageBuffer(imageSize * sizeof(uint32_t))) {
-            LOG_ERROR("创建临时缓冲区1失败");
+        if (!m_tempBuffer1->createStorageBuffer(tempBufferBytes)) {
+            LOG_ERROR("创建临时缓冲区1失败 ({} 字节)", tempBufferBytes);
             return false;
         }
+        LOG_DEBUG("临时缓冲区1创建成功: {} 字节", m_tempBuffer1->getSize());
         
-        // 临时缓冲区2（用于中间计算）
+        // 临时缓冲区2（32位中间结果）
         m_tempBuffer2 = std::make_unique<BufferManager>(m_context);
-        if (!m_tempBuffer2->createStorageBuffer(imageSize * sizeof(uint32_t))) {
-            LOG_ERROR("创建临时缓冲区2失败");
+        if (!m_tempBuffer2->createStorageBuffer(tempBufferBytes)) {
+            LOG_ERROR("创建临时缓冲区2失败 ({} 字节)", tempBufferBytes);
             return false;
         }
+        LOG_DEBUG("临时缓冲区2创建成功: {} 字节", m_tempBuffer2->getSize());
         
-        // 参数缓冲区
+        // 参数缓冲区（PipelineParams结构体）
         m_paramsBuffer = std::make_unique<BufferManager>(m_context);
-        if (!m_paramsBuffer->createUniformBuffer(sizeof(PipelineParams))) {
-            LOG_ERROR("创建参数缓冲区失败");
+        size_t paramsSize = sizeof(PipelineParams);
+        if (!m_paramsBuffer->createUniformBuffer(paramsSize)) {
+            LOG_ERROR("创建参数缓冲区失败 ({} 字节)", paramsSize);
             return false;
         }
+        LOG_DEBUG("参数缓冲区创建成功: {} 字节", m_paramsBuffer->getSize());
         
-        LOG_DEBUG("为立体匹配流水线创建了 {} 个缓冲区", 7);
+        LOG_INFO("✅ 立体匹配流水线缓冲区创建完成 (共7个缓冲区)");
+        LOG_INFO("  总内存使用: {:.2f} MB", 
+                 (imageBytes*2 + costVolumeBytes + disparityBytes + tempBufferBytes*2 + paramsSize) / (1024.0 * 1024.0));
         return true;
         
     } catch (const std::exception& e) {
@@ -514,28 +542,15 @@ bool StereoPipeline::createPipelines() {
 }
 
 bool StereoPipeline::checkShaderExists(const std::string& shaderName) {
-    // 尝试从多个位置查找着色器文件
+    // 简化搜索路径：只搜索关键的几个位置
     std::vector<std::string> searchPaths = {
-        // 从程序所在目录开始搜索
-        "shaders/" + shaderName,                     // build/shaders/
-        "../shaders/" + shaderName,                  // project/shaders/
-        "../../shaders/" + shaderName,               // project/../shaders/
-        
-        // SPIR-V编译输出目录（关键！）
-        "src/vulkan/spv/" + shaderName,              // src/vulkan/spv/
-        "../src/vulkan/spv/" + shaderName,           // build/src/vulkan/spv/
-        "../../src/vulkan/spv/" + shaderName,        // project/src/vulkan/spv/
-        
-        // 构建系统可能放置的位置
-        "build/shaders/" + shaderName,               // build/shaders/
-        "../build/shaders/" + shaderName,            // project/build/shaders/
-        "../../build/shaders/" + shaderName,         // project/../build/shaders/
-        
-        // 可能的其他位置
-        "third_party/shaders/" + shaderName,         // third_party/shaders/
-        "../third_party/shaders/" + shaderName,      // project/third_party/shaders/
-        
-        // 直接在当前目录
+        // 优先从构建目录的着色器目录搜索
+        "shaders/" + shaderName,
+        // 从项目源目录的SPIR-V输出目录搜索
+        "src/vulkan/spv/" + shaderName,
+        // 从构建目录的SPIR-V输出目录搜索
+        "../src/vulkan/spv/" + shaderName,
+        // 从当前目录搜索（作为最后的手段）
         shaderName
     };
     
@@ -552,28 +567,11 @@ bool StereoPipeline::checkShaderExists(const std::string& shaderName) {
 }
 
 bool StereoPipeline::loadShader(ComputePipeline& pipeline, const std::string& shaderName) {
-    // 尝试从多个位置查找着色器文件
+    // 简化搜索路径：与 checkShaderExists 保持一致
     std::vector<std::string> searchPaths = {
-        // 从程序所在目录开始搜索
-        "shaders/" + shaderName,                     // build/shaders/
-        "../shaders/" + shaderName,                  // project/shaders/
-        "../../shaders/" + shaderName,               // project/../shaders/
-        
-        // SPIR-V编译输出目录（关键！）
-        "src/vulkan/spv/" + shaderName,              // src/vulkan/spv/
-        "../src/vulkan/spv/" + shaderName,           // build/src/vulkan/spv/
-        "../../src/vulkan/spv/" + shaderName,        // project/src/vulkan/spv/
-        
-        // 构建系统可能放置的位置
-        "build/shaders/" + shaderName,               // build/shaders/
-        "../build/shaders/" + shaderName,            // project/build/shaders/
-        "../../build/shaders/" + shaderName,         // project/../build/shaders/
-        
-        // 可能的其他位置
-        "third_party/shaders/" + shaderName,         // third_party/shaders/
-        "../third_party/shaders/" + shaderName,      // project/third_party/shaders/
-        
-        // 直接在当前目录
+        "shaders/" + shaderName,
+        "src/vulkan/spv/" + shaderName,
+        "../src/vulkan/spv/" + shaderName,
         shaderName
     };
     
