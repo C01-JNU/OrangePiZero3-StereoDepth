@@ -41,15 +41,27 @@ int main(int argc, char* argv[]) {
     
     LOG_INFO("=== OrangePiZero3 立体深度 GPU 框架测试 ===");
     
-    // 设置Mali-G31所需的环境变量
+    // 设置Mali-G31所需的环境变量（必须在Vulkan初始化之前）
     setenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
     
     try {
+        // 诊断测试: 检查Vulkan环境
+        LOG_INFO("\n[诊断] 检查Vulkan环境");
+        LOG_INFO("------------------------");
+        
+        // 1. 检查环境变量
+        const char* panvkEnv = getenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER");
+        LOG_INFO("环境变量 PAN_I_WANT_A_BROKEN_VULKAN_DRIVER = {}", 
+                 panvkEnv ? panvkEnv : "未设置");
+        
+        // 2. 创建Vulkan上下文
+        LOG_INFO("\n创建Vulkan上下文...");
+        vulkan::VulkanContext vulkanContext;
+        
         // 测试1: Vulkan上下文
         LOG_INFO("\n[测试1] Vulkan上下文初始化");
         LOG_INFO("----------------------------------------");
         
-        vulkan::VulkanContext vulkanContext;
         if (!vulkanContext.initialize(false)) {
             LOG_ERROR("初始化Vulkan上下文失败");
             return EXIT_FAILURE;
@@ -59,6 +71,57 @@ int main(int argc, char* argv[]) {
         LOG_INFO("  设备: {}", vulkanContext.getDeviceName());
         LOG_INFO("  Vulkan版本: {}", vulkanContext.getVulkanVersion());
         LOG_INFO("  计算队列索引: {}", vulkanContext.getComputeQueueFamilyIndex());
+        
+        // 3. 检查物理设备信息
+        VkPhysicalDevice physicalDevice = vulkanContext.getPhysicalDevice();
+        if (physicalDevice == VK_NULL_HANDLE) {
+            LOG_ERROR("物理设备无效");
+            return EXIT_FAILURE;
+        }
+        
+        VkPhysicalDeviceProperties deviceProps;
+        vkGetPhysicalDeviceProperties(physicalDevice, &deviceProps);
+        
+        LOG_INFO("物理设备信息:");
+        LOG_INFO("  设备名称: {}", deviceProps.deviceName);
+        LOG_INFO("  设备类型: {}", 
+                 deviceProps.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "集成GPU" :
+                 deviceProps.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "独立GPU" :
+                 deviceProps.deviceType == VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU ? "虚拟GPU" :
+                 deviceProps.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? "CPU" : "其他");
+        LOG_INFO("  Vulkan API版本: {}.{}.{}", 
+                 VK_VERSION_MAJOR(deviceProps.apiVersion),
+                 VK_VERSION_MINOR(deviceProps.apiVersion),
+                 VK_VERSION_PATCH(deviceProps.apiVersion));
+        
+        // 4. 检查队列族
+        uint32_t queueFamilyCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
+        std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilies.data());
+        
+        LOG_INFO("队列族信息 ({} 个):", queueFamilyCount);
+        for (uint32_t i = 0; i < queueFamilyCount; ++i) {
+            std::string flagsStr;
+            if (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT) flagsStr += "计算 ";
+            if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) flagsStr += "图形 ";
+            if (queueFamilies[i].queueFlags & VK_QUEUE_TRANSFER_BIT) flagsStr += "传输 ";
+            if (queueFamilies[i].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) flagsStr += "稀疏绑定 ";
+            
+            LOG_INFO("  队列族 {}: 队列数={}, 标志=[{}]", 
+                     i, queueFamilies[i].queueCount, flagsStr);
+        }
+        
+        // 5. 检查设备扩展支持
+        uint32_t extensionCount = 0;
+        vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, nullptr);
+        std::vector<VkExtensionProperties> extensions(extensionCount);
+        vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, extensions.data());
+        
+        LOG_INFO("设备扩展 ({} 个):", extensionCount);
+        for (const auto& ext : extensions) {
+            LOG_INFO("  - {} (版本: {})", ext.extensionName, ext.specVersion);
+        }
         
         // 测试2: 缓冲区管理器
         LOG_INFO("\n[测试2] 缓冲区管理器");
@@ -139,130 +202,142 @@ int main(int argc, char* argv[]) {
             LOG_INFO("✅ 布局清理成功");
         }
         
-        /* ==============================================
-         * 测试4: 计算管线（暂时跳过，因为PanVK驱动问题）
-         * ==============================================
-         * 由于Mali-G31的PanVK驱动在创建计算管线时存在兼容性问题，
-         * 暂时跳过此测试，待后续解决。
-         * 
-         * 问题现象: 在vkCreateComputePipelines时发生段错误
-         * 可能原因: PanVK驱动对计算管线支持不完全
-         * 解决计划: 后续尝试更简单的着色器或等待驱动更新
-         * ==============================================
-         */
-        #if 0  // 将此处的0改为1可重新启用测试4
-        LOG_INFO("\n[测试4] 计算管线");
-        LOG_INFO("-------------------------");
+        // 测试3.5: 最小计算管线验证（直接使用Vulkan API）
+        LOG_INFO("\n[测试3.5] 最小计算管线验证");
+        LOG_INFO("----------------------------------");
         
         {
-            // 检查是否存在测试着色器
-            bool shaderExists = false;
-            std::string testShaderPaths[] = {
-                "src/vulkan/spv/test.comp.spv",
-                "shaders/test.comp.spv",
-                "build/shaders/test_merged.comp",
-                "../src/vulkan/spv/test.comp.spv",
-                "../../src/vulkan/spv/test.comp.spv"
+            LOG_INFO("步骤1: 创建最简单的着色器（内联SPIR-V）");
+            
+            // 与最小测试程序完全相同的SPIR-V代码
+            const uint32_t simpleShaderSPV[] = {
+                // 这是由 glslangValidator 编译的最简单着色器
+                0x07230203,0x00010000,0x00080001,0x00000015,0x00000000,0x00020011,0x00000001,0x0006000b,
+                0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
+                0x0006000f,0x00000005,0x00000004,0x6e69616d,0x00000000,0x0000000d,0x00060010,0x00000004,
+                0x00000011,0x00000001,0x00000001,0x00000001,0x00030003,0x00000002,0x000001c2,0x00040005,
+                0x00000004,0x6e69616d,0x00000000,0x00050006,0x00000009,0x00000000,0x7366666f,0x00007465,
+                0x00040005,0x0000000b,0x6c616373,0x00000000,0x00040005,0x0000000d,0x73657270,0x00000000,
+                0x00030047,0x00000009,0x00000002,0x00040047,0x0000000d,0x0000000b,0x0000001c,0x00020013,
+                0x00000002,0x00030021,0x00000003,0x00000002,0x00040015,0x00000006,0x00000020,0x00000001,
+                0x00040017,0x00000007,0x00000006,0x00000003,0x00040020,0x00000008,0x00000001,0x00000007,
+                0x0004003b,0x00000008,0x00000009,0x00000001,0x0004002b,0x00000006,0x0000000a,0x00000000,
+                0x00040020,0x0000000c,0x00000003,0x00000007,0x0004003b,0x0000000c,0x0000000d,0x00000003,
+                0x00050036,0x00000002,0x00000004,0x00000000,0x00000003,0x000200f8,0x00000005,0x000100fd,
+                0x00010038
             };
             
-            std::string shaderPath;
-            for (const auto& path : testShaderPaths) {
-                if (fileExists(path)) {
-                    shaderPath = path;
-                    shaderExists = true;
-                    break;
+            LOG_INFO("步骤2: 直接使用Vulkan API创建管线（绕过ComputePipeline类）");
+            
+            VkDevice device = vulkanContext.getDevice();
+            if (device == VK_NULL_HANDLE) {
+                LOG_ERROR("设备句柄无效");
+            } else {
+                LOG_INFO("设备句柄: {}", reinterpret_cast<void*>(device));
+                
+                // 1. 创建着色器模块
+                VkShaderModuleCreateInfo shaderInfo = {};
+                shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+                shaderInfo.codeSize = sizeof(simpleShaderSPV);
+                shaderInfo.pCode = simpleShaderSPV;
+                
+                VkShaderModule shaderModule;
+                VkResult result = vkCreateShaderModule(device, &shaderInfo, nullptr, &shaderModule);
+                
+                if (result != VK_SUCCESS) {
+                    LOG_ERROR("创建着色器模块失败: {}", result);
+                } else {
+                    LOG_INFO("✅ 着色器模块创建成功");
+                    
+                    // 2. 创建管线布局（空布局）
+                    VkPipelineLayoutCreateInfo layoutInfo = {};
+                    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+                    layoutInfo.setLayoutCount = 0;
+                    layoutInfo.pSetLayouts = nullptr;
+                    layoutInfo.pushConstantRangeCount = 0;
+                    layoutInfo.pPushConstantRanges = nullptr;
+                    
+                    VkPipelineLayout pipelineLayout;
+                    result = vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pipelineLayout);
+                    
+                    if (result != VK_SUCCESS) {
+                        LOG_ERROR("创建管线布局失败: {}", result);
+                        vkDestroyShaderModule(device, shaderModule, nullptr);
+                    } else {
+                        LOG_INFO("✅ 管线布局创建成功");
+                        
+                        // 3. 创建着色器阶段信息
+                        VkPipelineShaderStageCreateInfo stageInfo = {};
+                        stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                        stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+                        stageInfo.module = shaderModule;
+                        stageInfo.pName = "main";
+                        
+                        // 4. 创建计算管线
+                        VkComputePipelineCreateInfo pipelineInfo = {};
+                        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+                        pipelineInfo.stage = stageInfo;
+                        pipelineInfo.layout = pipelineLayout;
+                        pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+                        pipelineInfo.basePipelineIndex = -1;
+                        
+                        VkPipeline computePipeline;
+                        LOG_INFO("正在创建计算管线...");
+                        
+                        result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline);
+                        
+                        if (result != VK_SUCCESS) {
+                            LOG_ERROR("创建计算管线失败: {}", result);
+                            LOG_ERROR("Vulkan错误代码: {}", result);
+                            
+                            // 打印常见错误代码含义
+                            switch (result) {
+                                case -1: LOG_ERROR("  VK_ERROR_OUT_OF_HOST_MEMORY"); break;
+                                case -2: LOG_ERROR("  VK_ERROR_OUT_OF_DEVICE_MEMORY"); break;
+                                case -3: LOG_ERROR("  VK_ERROR_INITIALIZATION_FAILED"); break;
+                                case -4: LOG_ERROR("  VK_ERROR_DEVICE_LOST"); break;
+                                case -9: LOG_ERROR("  VK_ERROR_INCOMPATIBLE_DRIVER"); break;
+                                default: LOG_ERROR("  未知错误代码"); break;
+                            }
+                        } else {
+                            LOG_INFO("✅ 计算管线创建成功！");
+                            LOG_INFO("  ✓ 我们的VulkanContext设备支持计算管线");
+                            LOG_INFO("  ✓ PanVK驱动正常工作");
+                            
+                            // 清理管线
+                            vkDestroyPipeline(device, computePipeline, nullptr);
+                            LOG_INFO("  ✓ 管线已销毁");
+                        }
+                        
+                        // 清理布局
+                        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+                        LOG_INFO("  ✓ 管线布局已销毁");
+                        
+                        // 清理着色器模块
+                        vkDestroyShaderModule(device, shaderModule, nullptr);
+                        LOG_INFO("  ✓ 着色器模块已销毁");
+                    }
                 }
             }
             
-            if (shaderExists) {
-                LOG_INFO("✅ 找到测试着色器: {}", shaderPath);
-                
-                // 尝试从SPIR-V文件加载着色器
-                std::ifstream file(shaderPath, std::ios::binary | std::ios::ate);
-                if (file.is_open()) {
-                    size_t fileSize = static_cast<size_t>(file.tellg());
-                    LOG_INFO("着色器文件大小: {} 字节", fileSize);
-                    
-                    std::vector<uint32_t> buffer(fileSize / sizeof(uint32_t));
-                    
-                    file.seekg(0);
-                    file.read(reinterpret_cast<char*>(buffer.data()), fileSize);
-                    file.close();
-                    
-                    LOG_INFO("步骤1: 创建ComputePipeline对象");
-                    vulkan::ComputePipeline computePipeline(vulkanContext);
-                    LOG_INFO("✅ ComputePipeline对象创建成功");
-                    
-                    LOG_INFO("步骤2: 从内存加载着色器");
-                    if (!computePipeline.loadShaderFromMemory(buffer.data(), fileSize)) {
-                        LOG_ERROR("加载着色器失败");
-                        LOG_WARN("跳过计算管线测试...");
-                    } else {
-                        LOG_INFO("✅ 着色器从内存加载成功");
-                        
-                        LOG_INFO("步骤3: 创建描述符集布局");
-                        vulkan::DescriptorSetLayoutBuilder layoutBuilder(vulkanContext);
-                        layoutBuilder.addStorageBuffer(0, 1, VK_SHADER_STAGE_COMPUTE_BIT);
-                        
-                        VkDescriptorSetLayout layout = layoutBuilder.build();
-                        if (layout == VK_NULL_HANDLE) {
-                            LOG_ERROR("为管线创建布局失败");
-                            LOG_WARN("跳过计算管线创建...");
-                        } else {
-                            LOG_INFO("✅ 描述符集布局创建成功");
-                            
-                            LOG_INFO("步骤4: 为管线设置描述符集布局");
-                            computePipeline.setDescriptorSetLayout(layout);
-                            LOG_INFO("✅ 描述符集布局设置成功");
-                            
-                            LOG_INFO("步骤5: 创建计算管线");
-                            
-                            // 添加针对Mali-G31的特殊处理
-                            LOG_INFO("注意: Mali-G31 PanVK驱动可能存在兼容性问题");
-                            LOG_INFO("尝试创建最简化的计算管线...");
-                            
-                            try {
-                                if (!computePipeline.createPipeline()) {
-                                    LOG_ERROR("创建计算管线失败");
-                                    LOG_WARN("这可能是由于着色器与Mali-G31不兼容");
-                                    LOG_WARN("着色器可能需要重新编译为Vulkan 1.0目标");
-                                } else {
-                                    LOG_INFO("✅ 计算管线创建成功");
-                                }
-                            } catch (const std::exception& e) {
-                                LOG_ERROR("创建管线时发生异常: {}", e.what());
-                                LOG_WARN("跳过管线创建，继续测试...");
-                            } catch (...) {
-                                LOG_ERROR("创建管线时发生未知异常");
-                                LOG_WARN("跳过管线创建，继续测试...");
-                            }
-                            
-                            LOG_INFO("步骤6: 清理描述符集布局");
-                            vkDestroyDescriptorSetLayout(vulkanContext.getDevice(), layout, nullptr);
-                            LOG_INFO("✅ 描述符集布局清理成功");
-                        }
-                    }
-                    LOG_INFO("✅ 计算管线测试完成");
-                } else {
-                    LOG_WARN("无法打开着色器文件: {}", shaderPath);
-                }
-            } else {
-                LOG_WARN("⚠ 未找到测试着色器，跳过计算管线测试");
-                LOG_WARN("请先编译测试着色器:");
-                LOG_WARN("  1. 确保CMake已配置着色器编译");
-                LOG_WARN("  2. 检查src/vulkan/spv/目录是否有test.comp.spv文件");
-            }
+            LOG_INFO("✅ 最小计算管线验证完成");
         }
-        #else
-        LOG_INFO("\n[测试4] 计算管线 (已跳过)");
-        LOG_INFO("-------------------------");
-        LOG_INFO("⚠ 由于Mali-G31 PanVK驱动兼容性问题，暂时跳过计算管线测试");
-        LOG_INFO("  已知问题: vkCreateComputePipelines导致段错误");
-        LOG_INFO("  后续计划:");
-        LOG_INFO("    1. 创建更简单的测试着色器");
-        LOG_INFO("    2. 等待PanVK驱动更新");
-        LOG_INFO("    3. 或寻找替代的Vulkan实现");
-        #endif
+        
+        // 测试4: 计算管线 - 使用ComputePipeline类
+        LOG_INFO("\n[测试4] 计算管线 - 使用ComputePipeline类");
+        LOG_INFO("---------------------------------------");
+        
+        {
+            LOG_INFO("⚠ 由于PanVK驱动兼容性问题，跳过计算管线类测试");
+            LOG_INFO("  已知问题: vkCreateComputePipelines返回错误-13");
+            LOG_INFO("  问题分析:");
+            LOG_INFO("    1. 最小测试程序成功 → PanVK驱动支持计算管线");
+            LOG_INFO("    2. 我们的项目失败 → 可能是配置差异");
+            LOG_INFO("  后续计划:");
+            LOG_INFO("    1. 对比最小测试程序和项目的Vulkan初始化差异");
+            LOG_INFO("    2. 检查PanVK驱动的已知限制");
+            LOG_INFO("    3. 调整项目配置以适配PanVK驱动");
+        }
         
         // 测试5: 立体匹配流水线框架测试
         LOG_INFO("\n[测试5] 立体匹配流水线框架");

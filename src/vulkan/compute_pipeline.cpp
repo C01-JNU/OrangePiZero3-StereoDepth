@@ -132,9 +132,19 @@ bool ComputePipeline::createPipeline(size_t pushConstantSize) {
     
     VkDevice device = m_context.getDevice();
     
+    // 调试信息：只在debug级别大于2时输出
+    if (spdlog::get_level() <= spdlog::level::debug) {
+        LOG_DEBUG("创建计算管线参数:");
+        LOG_DEBUG("  设备: {}", reinterpret_cast<void*>(device));
+        LOG_DEBUG("  着色器模块: {}", reinterpret_cast<void*>(m_shaderModule));
+        LOG_DEBUG("  描述符集布局: {}", reinterpret_cast<void*>(m_descriptorSetLayout));
+        LOG_DEBUG("  推送常量大小: {} 字节", pushConstantSize);
+    }
+    
     // 创建管线布局
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.pNext = nullptr;
     pipelineLayoutInfo.flags = 0;
     
     // 设置描述符集布局
@@ -166,94 +176,105 @@ bool ComputePipeline::createPipeline(size_t pushConstantSize) {
     VkResult result = vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &m_pipelineLayout);
     if (result != VK_SUCCESS) {
         LOG_ERROR("创建管线布局失败: {}", result);
-        
-        // 提供详细的错误信息
-        switch (result) {
-            case VK_ERROR_OUT_OF_HOST_MEMORY:
-                LOG_ERROR("主机内存不足");
-                break;
-            case VK_ERROR_OUT_OF_DEVICE_MEMORY:
-                LOG_ERROR("设备内存不足");
-                break;
-            case VK_ERROR_INITIALIZATION_FAILED:
-                LOG_ERROR("初始化失败");
-                break;
-            case VK_ERROR_LAYER_NOT_PRESENT:
-                LOG_ERROR("请求的层不存在");
-                break;
-            case VK_ERROR_EXTENSION_NOT_PRESENT:
-                LOG_ERROR("请求的扩展不存在");
-                break;
-            case VK_ERROR_INCOMPATIBLE_DRIVER:
-                LOG_ERROR("驱动程序不兼容");
-                break;
-            default:
-                LOG_ERROR("未知错误代码: {}", result);
-                break;
-        }
-        
         return false;
     }
     
     LOG_INFO("✅ 管线布局创建成功");
     
-    // 创建计算管线 - 针对PanVK驱动进行特殊处理
+    if (spdlog::get_level() <= spdlog::level::debug) {
+        LOG_DEBUG("管线布局创建成功: {}", reinterpret_cast<void*>(m_pipelineLayout));
+    }
+    
+    // 创建计算管线 - 关键修复：完整初始化所有字段
     VkComputePipelineCreateInfo pipelineInfo = {};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipelineInfo.pNext = nullptr;  // 重要！
+    pipelineInfo.flags = 0;        // 重要！
     pipelineInfo.layout = m_pipelineLayout;
-    pipelineInfo.flags = 0;  // PanVK可能不支持派生管线
-    pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
-    pipelineInfo.basePipelineIndex = -1;
+    pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;  // 重要！
+    pipelineInfo.basePipelineIndex = -1;               // 重要！
     
-    // 着色器阶段信息
+    // 着色器阶段信息 - 完整初始化
     VkPipelineShaderStageCreateInfo shaderStageInfo = {};
     shaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shaderStageInfo.pNext = nullptr;
+    shaderStageInfo.flags = 0;
     shaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     shaderStageInfo.module = m_shaderModule;
-    shaderStageInfo.pName = "main"; // 着色器入口函数名
-    shaderStageInfo.flags = 0;  // 禁用所有特殊标志
-    shaderStageInfo.pSpecializationInfo = nullptr;  // 禁用特化常量
+    shaderStageInfo.pName = "main";
+    shaderStageInfo.pSpecializationInfo = nullptr;  // 重要！
     
     pipelineInfo.stage = shaderStageInfo;
     
+    // 调试信息：输出完整的管线创建信息
+    if (spdlog::get_level() <= spdlog::level::debug) {
+        LOG_DEBUG("计算管线创建信息:");
+        LOG_DEBUG("  sType: {}", pipelineInfo.sType);
+        LOG_DEBUG("  pNext: {}", reinterpret_cast<void*>(pipelineInfo.pNext));
+        LOG_DEBUG("  flags: {}", pipelineInfo.flags);
+        LOG_DEBUG("  阶段: compute");
+        LOG_DEBUG("  布局: {}", reinterpret_cast<void*>(pipelineInfo.layout));
+        LOG_DEBUG("  basePipelineHandle: {}", reinterpret_cast<void*>(pipelineInfo.basePipelineHandle));
+        LOG_DEBUG("  basePipelineIndex: {}", pipelineInfo.basePipelineIndex);
+        
+        LOG_DEBUG("着色器阶段信息:");
+        LOG_DEBUG("  着色器模块: {}", reinterpret_cast<void*>(shaderStageInfo.module));
+        LOG_DEBUG("  入口点: {}", shaderStageInfo.pName);
+        LOG_DEBUG("  特化信息: {}", reinterpret_cast<void*>(shaderStageInfo.pSpecializationInfo));
+    }
+    
     LOG_DEBUG("正在创建计算管线...");
     
-    // 尝试创建计算管线，增加错误检查
     result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_pipeline);
     if (result != VK_SUCCESS) {
         LOG_ERROR("创建计算管线失败: {}", result);
         
-        // 提供详细的错误信息
-        switch (result) {
-            case VK_ERROR_OUT_OF_HOST_MEMORY:
-                LOG_ERROR("主机内存不足");
-                break;
-            case VK_ERROR_OUT_OF_DEVICE_MEMORY:
-                LOG_ERROR("设备内存不足");
-                break;
-            case VK_ERROR_INITIALIZATION_FAILED:
-                LOG_ERROR("初始化失败 - 可能是着色器不兼容");
-                break;
-            case VK_ERROR_DEVICE_LOST:
-                LOG_ERROR("设备丢失 - 可能是驱动程序崩溃");
-                break;
-            case VK_ERROR_INVALID_SHADER_NV:
-                LOG_ERROR("无效的着色器");
-                break;
-            default:
-                LOG_ERROR("未知错误代码: {}", result);
-                break;
+        // 更详细的错误信息
+        if (result == VK_ERROR_INCOMPATIBLE_DRIVER) {
+            LOG_ERROR("错误 -13: VK_ERROR_INCOMPATIBLE_DRIVER");
+            LOG_ERROR("可能原因:");
+            LOG_ERROR("  1. 驱动程序版本太旧");
+            LOG_ERROR("  2. 驱动程序不支持某些Vulkan特性");
+            LOG_ERROR("  3. 创建管线时的参数不完整");
+            LOG_ERROR("  4. 着色器使用了驱动程序不支持的SPIR-V特性");
+        } else {
+            LOG_ERROR("错误代码: {}", result);
+            
+            // 常见错误代码解释
+            switch (result) {
+                case VK_ERROR_OUT_OF_HOST_MEMORY:
+                    LOG_ERROR("主机内存不足");
+                    break;
+                case VK_ERROR_OUT_OF_DEVICE_MEMORY:
+                    LOG_ERROR("设备内存不足");
+                    break;
+                case VK_ERROR_INITIALIZATION_FAILED:
+                    LOG_ERROR("初始化失败");
+                    break;
+                case VK_ERROR_DEVICE_LOST:
+                    LOG_ERROR("设备丢失");
+                    break;
+                case VK_ERROR_FEATURE_NOT_PRESENT:
+                    LOG_ERROR("不支持的特性");
+                    break;
+                case VK_ERROR_EXTENSION_NOT_PRESENT:
+                    LOG_ERROR("扩展不存在");
+                    break;
+                default:
+                    LOG_ERROR("未知错误代码");
+                    break;
+            }
         }
         
-        // 清理已创建的管线布局
         vkDestroyPipelineLayout(device, m_pipelineLayout, nullptr);
         m_pipelineLayout = VK_NULL_HANDLE;
         return false;
     }
     
     LOG_INFO("✅ 计算管线创建成功");
-    if (pushConstantSize > 0) {
-        LOG_DEBUG("推送常量: {} 字节", pushConstantSize);
+    
+    if (spdlog::get_level() <= spdlog::level::debug) {
+        LOG_DEBUG("计算管线创建成功: {}", reinterpret_cast<void*>(m_pipeline));
     }
     
     return true;
@@ -363,23 +384,6 @@ VkShaderModule ComputePipeline::createShaderModule(const uint32_t* code, size_t 
     
     if (result != VK_SUCCESS) {
         LOG_ERROR("创建着色器模块失败: {}", result);
-        
-        // 提供详细的错误信息
-        switch (result) {
-            case VK_ERROR_OUT_OF_HOST_MEMORY:
-                LOG_ERROR("主机内存不足");
-                break;
-            case VK_ERROR_OUT_OF_DEVICE_MEMORY:
-                LOG_ERROR("设备内存不足");
-                break;
-            case VK_ERROR_INITIALIZATION_FAILED:
-                LOG_ERROR("初始化失败");
-                break;
-            default:
-                LOG_ERROR("未知错误代码: {}", result);
-                break;
-        }
-        
         return VK_NULL_HANDLE;
     }
     
@@ -422,7 +426,6 @@ bool ComputePipeline::createDescriptorPool(const std::vector<VkDescriptorType>& 
     poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
     poolInfo.pPoolSizes = poolSizes.data();
     poolInfo.maxSets = 1; // 我们只需要一个描述符集
-    poolInfo.flags = 0;   // 不使用VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT
     
     VkResult result = vkCreateDescriptorPool(device, &poolInfo, nullptr, &m_descriptorPool);
     if (result != VK_SUCCESS) {

@@ -223,7 +223,7 @@ bool VulkanContext::selectPhysicalDevice() {
 }
 
 bool VulkanContext::createLogicalDevice() {
-    LOG_DEBUG("正在创建逻辑设备（最小化特性）...");
+    LOG_DEBUG("正在创建逻辑设备（PanVK兼容模式）...");
     
     compute_queue_family_index_ = findComputeQueueFamily();
     if (compute_queue_family_index_ == static_cast<uint32_t>(-1)) {
@@ -239,26 +239,54 @@ bool VulkanContext::createLogicalDevice() {
     queue_create_info.queueCount = 1;
     queue_create_info.pQueuePriorities = &queue_priority;
     
-    // 设备特性 - 最小化
-    VkPhysicalDeviceFeatures device_features = {};
-    
-    // 对于PanVK，可能不需要任何扩展
+    // ⚠️ 重要：对于PanVK驱动，我们使用nullptr让驱动选择默认特性
+    // 不要设置device_features = {}，因为全0会告诉驱动"我什么特性都不要"
     std::vector<const char*> device_extensions;
     
-    LOG_DEBUG("正在创建逻辑设备，包含 {} 个扩展", device_extensions.size());
+    LOG_DEBUG("创建逻辑设备（PanVK兼容模式）...");
+    LOG_DEBUG("队列族索引: {}", compute_queue_family_index_);
+    LOG_DEBUG("扩展数量: {}", device_extensions.size());
     
-    // 创建设备
+    // 创建设备 - 关键修改：pEnabledFeatures设为nullptr
     VkDeviceCreateInfo create_info = {};
     create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     create_info.queueCreateInfoCount = 1;
     create_info.pQueueCreateInfos = &queue_create_info;
-    create_info.pEnabledFeatures = &device_features;
+    create_info.pEnabledFeatures = nullptr;  // ✅ 关键修改：设为nullptr
     create_info.enabledExtensionCount = static_cast<uint32_t>(device_extensions.size());
     create_info.ppEnabledExtensionNames = device_extensions.empty() ? nullptr : device_extensions.data();
     
     VkResult result = vkCreateDevice(physical_device_, &create_info, nullptr, &device_);
     if (result != VK_SUCCESS) {
         LOG_ERROR("创建逻辑设备失败: {}", result);
+        
+        // 提供详细的错误信息
+        switch (result) {
+            case VK_ERROR_OUT_OF_HOST_MEMORY:
+                LOG_ERROR("主机内存不足");
+                break;
+            case VK_ERROR_OUT_OF_DEVICE_MEMORY:
+                LOG_ERROR("设备内存不足");
+                break;
+            case VK_ERROR_INITIALIZATION_FAILED:
+                LOG_ERROR("初始化失败 - Vulkan可能未正确安装");
+                break;
+            case VK_ERROR_EXTENSION_NOT_PRESENT:
+                LOG_ERROR("请求的扩展不存在");
+                break;
+            case VK_ERROR_FEATURE_NOT_PRESENT:
+                LOG_ERROR("请求的特性不存在");
+                break;
+            case VK_ERROR_TOO_MANY_OBJECTS:
+                LOG_ERROR("对象过多");
+                break;
+            case VK_ERROR_DEVICE_LOST:
+                LOG_ERROR("设备丢失");
+                break;
+            default:
+                LOG_ERROR("未知错误: {}", result);
+                break;
+        }
         return false;
     }
     
@@ -266,6 +294,9 @@ bool VulkanContext::createLogicalDevice() {
     vkGetDeviceQueue(device_, compute_queue_family_index_, 0, &compute_queue_);
     
     LOG_DEBUG("逻辑设备创建成功");
+    LOG_DEBUG("设备句柄: {}", reinterpret_cast<void*>(device_));
+    LOG_DEBUG("计算队列句柄: {}", reinterpret_cast<void*>(compute_queue_));
+    
     return true;
 }
 
