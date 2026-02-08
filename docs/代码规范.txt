@@ -144,13 +144,11 @@ OrangePiZero3-StereoDepth 着色器编写规范
 最后更新：2026年2月8日
 作者：C01-JNU
 1. 文件命名
-着色器文件使用小写字母，单词间用下划线分隔
-
-计算着色器：census_transform.comp, cost_calculation.comp
-
-后缀：.comp（计算着色器）
-
-编译后SPIR-V文件：census_transform.comp.spv
+census.comp
+cost.comp
+aggregation.comp
+wta.comp
+postprocess.comp
 
 2. 代码结构
 2.1 头部注释

@@ -1,0 +1,179 @@
+#version 450
+// Census变换计算着色器
+// 功能：生成左眼图像的64位Census描述符
+// 算法：使用9×9窗口，取前64个邻居，比较规则：neighbor > center ? 1 : 0
+// 最后更新: 2026年2月8日
+// 作者: C01-JNU
+
+// 编译时插入的参数宏（由merge_shader.py自动插入）
+layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y, local_size_z = 1) in;
+
+// Uniform缓冲区（必须与C++端的PipelineParams完全匹配）
+layout(std140, binding = 0) uniform Parameters {
+    uint imageWidth;        // 偏移: 0
+    uint imageHeight;       // 偏移: 4
+    uint maxDisparity;      // 偏移: 8
+    uint windowSize;        // 偏移: 12
+    
+    float uniquenessRatio;  // 偏移: 16
+    float penaltyP1;        // 偏移: 20
+    float penaltyP2;        // 偏移: 24
+    uint flags;             // 偏移: 28
+    
+    uint speckleWindow;     // 偏移: 32
+    uint speckleRange;      // 偏移: 36
+    uint medianSize;        // 偏移: 40
+    uint padding[3];        // 偏移: 44, 48, 52
+} params;
+
+// 输入缓冲区：左右拼接图像 (640x480)
+// 左眼：x∈[0, 319]，右眼：x∈[320, 639]
+// 使用uint存储8位灰度值（0-255）
+layout(binding = 1) readonly buffer InputBuffer {
+    uint data[];
+} inputBuffer;
+
+// 输出缓冲区：左眼Census描述符 (320x480 × 2个uint)
+// 每个像素的64位描述符存储为2个连续的uint：
+// [pixel0_low, pixel0_high, pixel1_low, pixel1_high, ...]
+layout(binding = 2) writeonly buffer OutputBuffer {
+    uint data[];
+} outputBuffer;
+
+// 调试缓冲区：用于验证和调试信息
+layout(binding = 3) writeonly buffer DebugBuffer {
+    uint info[8];
+} debugBuffer;
+
+// 常量定义（基于WINDOW_SIZE宏，将在编译时插入）
+#define RADIUS ((WINDOW_SIZE - 1) / 2)           // 窗口半径（对于9×9窗口，RADIUS=4）
+#define NUM_NEIGHBORS (WINDOW_SIZE * WINDOW_SIZE - 1)  // 总邻居数（80）
+#define BITS_PER_PIXEL 64                             // 每个像素的描述符位数
+
+// 辅助函数：获取拼接图像中的像素值
+uint getPixelValue(uint x, uint y) {
+    // x是原始拼接图像的x坐标（0-639）
+    // y是图像的y坐标（0-479）
+    // 拼接图像宽度是单眼的2倍，所以是2 * IMAGE_WIDTH
+    uint index = y * (2 * IMAGE_WIDTH) + x;
+    return inputBuffer.data[index];
+}
+
+// 辅助函数：获取左眼图像中的像素值（x∈[0,IMAGE_WIDTH-1]）
+uint getLeftPixelValue(uint leftX, uint leftY) {
+    // 左眼图像在拼接图像的前半部分
+    return getPixelValue(leftX, leftY);
+}
+
+void main() {
+    // 获取当前像素在左眼图像中的位置
+    uint leftX = gl_GlobalInvocationID.x;
+    uint leftY = gl_GlobalInvocationID.y;
+    
+    // 边界检查（使用编译时常量）
+    if (leftX >= IMAGE_WIDTH || leftY >= IMAGE_HEIGHT) {
+        return;
+    }
+    
+    // 计算像素索引（在左眼图像中）
+    uint leftPixelIndex = (leftY * IMAGE_WIDTH) + leftX;
+    
+    // 计算输出缓冲区中的起始位置（每个像素占2个uint）
+    uint outputBaseIndex = leftPixelIndex * 2;
+    
+    // 获取中心像素值（左眼图像）
+    uint centerValue = getLeftPixelValue(leftX, leftY);
+    
+    // 初始化64位描述符（2个uint，初始为0）
+    uint descLow = 0u;
+    uint descHigh = 0u;
+    
+    // 统计有效邻居数（用于调试）
+    uint validNeighbors = 0u;
+    
+    // 检查是否为边界像素（窗口会超出图像边界）
+    bool isBoundaryPixel = false;
+    if (leftX < uint(RADIUS) || leftX >= IMAGE_WIDTH - uint(RADIUS) ||
+        leftY < uint(RADIUS) || leftY >= IMAGE_HEIGHT - uint(RADIUS)) {
+        isBoundaryPixel = true;
+    }
+    
+    // 生成Census描述符
+    // 使用行优先顺序遍历9×9窗口（-RADIUS到RADIUS）
+    int bitIndex = 0;  // 当前处理的位索引（0-63）
+    
+    for (int dy = -RADIUS; dy <= RADIUS; dy++) {
+        for (int dx = -RADIUS; dx <= RADIUS; dx++) {
+            // 跳过中心点
+            if (dx == 0 && dy == 0) {
+                continue;
+            }
+            
+            // 只取前64个邻居
+            if (bitIndex >= int(BITS_PER_PIXEL)) {
+                break;
+            }
+            
+            // 计算邻居像素在左眼图像中的坐标
+            int neighborX = int(leftX) + dx;
+            int neighborY = int(leftY) + dy;
+            
+            // 检查邻居是否在图像边界内
+            if (neighborX >= 0 && neighborX < int(IMAGE_WIDTH) &&
+                neighborY >= 0 && neighborY < int(IMAGE_HEIGHT)) {
+                
+                // 获取邻居像素值
+                uint neighborValue = getLeftPixelValue(uint(neighborX), uint(neighborY));
+                
+                // Census比较：neighbor > center ? 1 : 0
+                if (neighborValue > centerValue) {
+                    // 设置对应的位
+                    if (bitIndex < 32) {
+                        // 低32位
+                        descLow |= (1u << uint(bitIndex));
+                    } else {
+                        // 高32位（位索引32-63）
+                        descHigh |= (1u << uint(bitIndex - 32));
+                    }
+                }
+                
+                validNeighbors++;
+            }
+            
+            bitIndex++;
+        }
+    }
+    
+    // 写入输出缓冲区
+    outputBuffer.data[outputBaseIndex] = descLow;
+    outputBuffer.data[outputBaseIndex + 1u] = descHigh;
+    
+    // 第一个像素记录调试信息
+    if (leftPixelIndex == 0u) {
+        // 验证编译时常量与Uniform值的一致性
+        bool configValid = true;
+        
+        if (IMAGE_WIDTH != params.imageWidth ||
+            IMAGE_HEIGHT != params.imageHeight ||
+            WINDOW_SIZE != params.windowSize) {
+            configValid = false;
+        }
+        
+        // 记录调试信息
+        debugBuffer.info[0u] = params.imageWidth;
+        debugBuffer.info[1u] = params.imageHeight;
+        debugBuffer.info[2u] = params.windowSize;
+        debugBuffer.info[3u] = isBoundaryPixel ? 1u : 0u;
+        debugBuffer.info[4u] = validNeighbors;
+        debugBuffer.info[5u] = configValid ? 1u : 0u;
+        debugBuffer.info[6u] = IMAGE_WIDTH;
+        debugBuffer.info[7u] = WINDOW_SIZE;
+        
+        // 在输出缓冲区的前几个位置也记录一些验证信息
+        outputBuffer.data[0u] = params.imageWidth;
+        outputBuffer.data[1u] = params.imageHeight;
+        outputBuffer.data[2u] = params.windowSize;
+        outputBuffer.data[3u] = descLow;
+        outputBuffer.data[4u] = descHigh;
+    }
+}

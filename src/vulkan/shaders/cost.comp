@@ -1,0 +1,200 @@
+#version 450
+// 代价计算着色器
+// 功能：计算左右眼Census描述符的汉明距离，生成代价立方体
+// 输入：左右眼Census描述符（每个像素64位 = 2个uint）
+// 输出：代价立方体（320x480x64），每个元素为uint类型的汉明距离
+// 最后更新: 2026年2月8日
+// 作者: C01-JNU
+
+// 编译时插入的参数宏（由merge_shader.py自动插入）
+layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y, local_size_z = 1) in;
+
+// Uniform缓冲区（必须与C++端的PipelineParams完全匹配）
+layout(std140, binding = 0) uniform Parameters {
+    uint imageWidth;        // 偏移: 0
+    uint imageHeight;       // 偏移: 4
+    uint maxDisparity;      // 偏移: 8
+    uint windowSize;        // 偏移: 12
+    
+    float uniquenessRatio;  // 偏移: 16
+    float penaltyP1;        // 偏移: 20
+    float penaltyP2;        // 偏移: 24
+    uint flags;             // 偏移: 28
+    
+    uint speckleWindow;     // 偏移: 32
+    uint speckleRange;      // 偏移: 36
+    uint medianSize;        // 偏移: 40
+    uint padding[3];        // 偏移: 44, 48, 52
+} params;
+
+// 输入缓冲区：左眼Census描述符 (320x480 × 2个uint)
+// 每个像素的64位描述符存储为2个连续的uint：[低32位, 高32位]
+layout(binding = 1) readonly buffer LeftCensusBuffer {
+    uint data[];
+} leftCensusBuffer;
+
+// 输入缓冲区：右眼Census描述符 (320x480 × 2个uint)
+layout(binding = 2) readonly buffer RightCensusBuffer {
+    uint data[];
+} rightCensusBuffer;
+
+// 输出缓冲区：代价立方体 (320x480 × MAX_DISPARITY)
+// 布局：[像素0_视差0, 像素0_视差1, ..., 像素0_视差63, 像素1_视差0, ...]
+// 每个元素为uint类型的汉明距离（0-64）
+layout(binding = 3) writeonly buffer CostVolumeBuffer {
+    uint data[];
+} costVolumeBuffer;
+
+// 调试缓冲区：用于验证和调试信息
+layout(binding = 4) writeonly buffer DebugBuffer {
+    uint info[8];
+} debugBuffer;
+
+// 32位汉明权重查找表（预计算的popcount）
+// 由于Mali-G31不支持位计数指令，使用查找表优化
+const uint HAMMING_TABLE[256] = uint[256](
+    0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4,1,2,2,3,2,3,3,4,2,3,3,4,3,4,4,5,
+    1,2,2,3,2,3,3,4,2,3,3,4,3,4,4,5,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,
+    1,2,2,3,2,3,3,4,2,3,3,4,3,4,4,5,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,
+    2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,3,4,4,5,4,5,5,6,4,5,5,6,5,6,6,7,
+    1,2,2,3,2,3,3,4,2,3,3,4,3,4,4,5,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,
+    2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,3,4,4,5,4,5,5,6,4,5,5,6,5,6,6,7,
+    2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,3,4,4,5,4,5,5,6,4,5,5,6,5,6,6,7,
+    3,4,4,5,4,5,5,6,4,5,5,6,5,6,6,7,4,5,5,6,5,6,6,7,5,6,6,7,6,7,7,8
+);
+
+// 计算32位整数的汉明距离（1的个数）
+uint hammingWeight32(uint x) {
+    // 使用查找表，分成4个字节计算
+    return HAMMING_TABLE[x & 0xFFu] +
+           HAMMING_TABLE[(x >> 8) & 0xFFu] +
+           HAMMING_TABLE[(x >> 16) & 0xFFu] +
+           HAMMING_TABLE[(x >> 24) & 0xFFu];
+}
+
+// 计算64位整数的汉明距离（两个32位整数）
+uint hammingWeight64(uint low, uint high) {
+    return hammingWeight32(low) + hammingWeight32(high);
+}
+
+// 计算两个64位Census描述符的汉明距离
+uint computeHammingDistance(uint leftLow, uint leftHigh, uint rightLow, uint rightHigh) {
+    // 异或操作找出不同的位
+    uint xorLow = leftLow ^ rightLow;
+    uint xorHigh = leftHigh ^ rightHigh;
+    
+    // 计算1的个数
+    return hammingWeight64(xorLow, xorHigh);
+}
+
+// 辅助函数：获取左眼Census描述符
+void getLeftCensusDescriptor(uint pixelIndex, out uint low, out uint high) {
+    uint baseIndex = pixelIndex * 2u;
+    low = leftCensusBuffer.data[baseIndex];
+    high = leftCensusBuffer.data[baseIndex + 1u];
+}
+
+// 辅助函数：获取右眼Census描述符
+void getRightCensusDescriptor(uint pixelIndex, out uint low, out uint high) {
+    uint baseIndex = pixelIndex * 2u;
+    low = rightCensusBuffer.data[baseIndex];
+    high = rightCensusBuffer.data[baseIndex + 1u];
+}
+
+void main() {
+    // 获取当前像素在左眼图像中的位置
+    uint leftX = gl_GlobalInvocationID.x;
+    uint leftY = gl_GlobalInvocationID.y;
+    
+    // 边界检查
+    if (leftX >= IMAGE_WIDTH || leftY >= IMAGE_HEIGHT) {
+        return;
+    }
+    
+    // 计算像素索引（在左眼图像中）
+    uint leftPixelIndex = (leftY * IMAGE_WIDTH) + leftX;
+    
+    // 获取左眼像素的Census描述符
+    uint leftLow, leftHigh;
+    getLeftCensusDescriptor(leftPixelIndex, leftLow, leftHigh);
+    
+    // 遍历所有可能的视差（0到MAX_DISPARITY-1）
+    for (uint d = 0u; d < MAX_DISPARITY; d++) {
+        uint hammingDist = 64u;  // 默认最大距离（64位都不同）
+        
+        // 计算右眼像素的x坐标：左眼像素向右偏移d
+        // 注意：标准立体匹配中，左眼像素(x,y)对应右眼像素(x-d,y)
+        int rightX = int(leftX) - int(d);
+        
+        // 检查右眼像素是否在图像内
+        if (rightX >= 0) {
+            uint rightPixelIndex = (leftY * IMAGE_WIDTH) + uint(rightX);
+            
+            // 获取右眼像素的Census描述符
+            uint rightLow, rightHigh;
+            getRightCensusDescriptor(rightPixelIndex, rightLow, rightHigh);
+            
+            // 计算汉明距离
+            hammingDist = computeHammingDistance(leftLow, leftHigh, rightLow, rightHigh);
+        }
+        
+        // 计算在代价立方体中的索引
+        // 布局：[像素0_视差0, 像素0_视差1, ..., 像素1_视差0, ...]
+        uint costIndex = (leftPixelIndex * MAX_DISPARITY) + d;
+        
+        // 存储代价
+        costVolumeBuffer.data[costIndex] = hammingDist;
+    }
+    
+    // 第一个像素记录调试信息
+    if (leftPixelIndex == 0u) {
+        // 验证编译时常量与Uniform值的一致性
+        bool configValid = true;
+        
+        if (IMAGE_WIDTH != params.imageWidth ||
+            IMAGE_HEIGHT != params.imageHeight ||
+            MAX_DISPARITY != params.maxDisparity) {
+            configValid = false;
+        }
+        
+        // 获取第一个像素的左右眼Census描述符用于调试
+        uint leftLowDebug, leftHighDebug;
+        uint rightLowDebug, rightHighDebug;
+        
+        getLeftCensusDescriptor(0u, leftLowDebug, leftHighDebug);
+        getRightCensusDescriptor(0u, rightLowDebug, rightHighDebug);
+        
+        // 计算第一个像素在视差0时的汉明距离
+        uint firstHamming = computeHammingDistance(leftLowDebug, leftHighDebug, rightLowDebug, rightHighDebug);
+        
+        // 记录调试信息
+        debugBuffer.info[0u] = params.imageWidth;
+        debugBuffer.info[1u] = params.imageHeight;
+        debugBuffer.info[2u] = params.maxDisparity;
+        debugBuffer.info[3u] = configValid ? 1u : 0u;
+        debugBuffer.info[4u] = leftLowDebug;      // 左眼第一个像素低32位
+        debugBuffer.info[5u] = leftHighDebug;     // 左眼第一个像素高32位
+        debugBuffer.info[6u] = rightLowDebug;     // 右眼第一个像素低32位
+        debugBuffer.info[7u] = firstHamming;      // 第一个像素在视差0时的汉明距离
+        
+        // 在代价缓冲区的前几个位置也记录一些验证信息
+        costVolumeBuffer.data[0] = params.imageWidth;
+        costVolumeBuffer.data[1] = params.imageHeight;
+        costVolumeBuffer.data[2] = params.maxDisparity;
+        
+        // 记录第一个像素在所有视差下的代价（前8个视差）
+        for (uint d = 0u; d < min(8u, MAX_DISPARITY); d++) {
+            uint rightX = 0u - d;  // 第一个像素，d=0时rightX=0
+            uint hammingDist = 64u;
+            
+            if (rightX < IMAGE_WIDTH) {  // 这里rightX是uint，所以负值会很大
+                uint rightPixelIndex = (0u * IMAGE_WIDTH) + rightX;
+                uint rightLow, rightHigh;
+                getRightCensusDescriptor(rightPixelIndex, rightLow, rightHigh);
+                hammingDist = computeHammingDistance(leftLowDebug, leftHighDebug, rightLow, rightHigh);
+            }
+            
+            costVolumeBuffer.data[3 + d] = hammingDist;
+        }
+    }
+}
