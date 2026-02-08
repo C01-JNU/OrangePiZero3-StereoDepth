@@ -239,20 +239,24 @@ bool VulkanContext::createLogicalDevice() {
     queue_create_info.queueCount = 1;
     queue_create_info.pQueuePriorities = &queue_priority;
     
-    // ⚠️ 重要：对于PanVK驱动，我们使用nullptr让驱动选择默认特性
-    // 不要设置device_features = {}，因为全0会告诉驱动"我什么特性都不要"
+    // ⚠️ PanVK驱动关键修复：使用全零特性结构体
+    VkPhysicalDeviceFeatures enabledFeatures = {};
+    // 确保所有可选特性都禁用（全0）
+    
+    // 扩展列表保持为空
     std::vector<const char*> device_extensions;
     
     LOG_DEBUG("创建逻辑设备（PanVK兼容模式）...");
     LOG_DEBUG("队列族索引: {}", compute_queue_family_index_);
     LOG_DEBUG("扩展数量: {}", device_extensions.size());
+    LOG_DEBUG("设备特性: 全部禁用（PanVK驱动bug绕行）");
     
-    // 创建设备 - 关键修改：pEnabledFeatures设为nullptr
+    // 创建设备 - 关键修复
     VkDeviceCreateInfo create_info = {};
     create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     create_info.queueCreateInfoCount = 1;
     create_info.pQueueCreateInfos = &queue_create_info;
-    create_info.pEnabledFeatures = nullptr;  // ✅ 关键修改：设为nullptr
+    create_info.pEnabledFeatures = &enabledFeatures;  // ✅ 关键修复
     create_info.enabledExtensionCount = static_cast<uint32_t>(device_extensions.size());
     create_info.ppEnabledExtensionNames = device_extensions.empty() ? nullptr : device_extensions.data();
     

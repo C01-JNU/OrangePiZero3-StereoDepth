@@ -1,0 +1,20 @@
+#version 450
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+// 第二阶段：中间结果 -> 最终结果
+layout(binding = 0) buffer Stage1Output {
+    uint data[];
+} stage1Output;
+
+layout(binding = 1) buffer FinalOutput {
+    uint data[];
+} finalOutput;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < 1024) {
+        // 第二阶段计算：乘以3
+        finalOutput.data[idx] = stage1Output.data[idx] * 3;
+    }
+}

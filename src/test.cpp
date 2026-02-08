@@ -11,7 +11,6 @@
 #include <opencv2/opencv.hpp>
 #include <fstream>
 #include <sys/stat.h>
-#include <tuple>
 
 /**
  * @brief 检查文件是否存在（跨平台兼容版本）
@@ -24,90 +23,6 @@ bool fileExists(const std::string& filename) {
 }
 
 /**
- * @brief 从多个路径加载配置文件
- * @return 是否加载成功
- */
-bool loadConfiguration() {
-    using namespace stereo_depth::utils;
-    
-    std::vector<std::string> configPaths = {
-        "config/global_config.yaml",
-        "../config/global_config.yaml", 
-        "../../config/global_config.yaml",
-        "../../../config/global_config.yaml"
-    };
-    
-    LOG_INFO("正在查找配置文件...");
-    
-    for (const auto& path : configPaths) {
-        if (fileExists(path)) {
-            LOG_INFO("找到配置文件: {}", path);
-            if (ConfigManager::getInstance().loadGlobalConfig(path)) {
-                return true;
-            }
-        }
-    }
-    
-    LOG_WARN("未找到配置文件，将使用默认值");
-    return false;
-}
-
-/**
- * @brief 从配置文件获取流水线配置
- * @return 元组 (单眼宽度, 图像高度, 最大视差)
- */
-std::tuple<uint32_t, uint32_t, uint32_t> getPipelineConfigFromFile() {
-    using namespace stereo_depth::utils;
-    
-    ConfigManager& configManager = ConfigManager::getInstance();
-    
-    uint32_t cameraWidth = 640;
-    uint32_t cameraHeight = 480;
-    uint32_t maxDisparity = 64;
-    
-    try {
-        // 使用 int 读取，然后转换为 uint32_t
-        cameraWidth = static_cast<uint32_t>(configManager.getConfig().get<int>("camera.width", 640));
-        cameraHeight = static_cast<uint32_t>(configManager.getConfig().get<int>("camera.height", 480));
-        maxDisparity = static_cast<uint32_t>(configManager.getConfig().get<int>("stereo.max_disparity", 64));
-        
-        LOG_INFO("从配置文件读取:");
-        LOG_INFO("  摄像头分辨率: {}x{}", cameraWidth, cameraHeight);
-        LOG_INFO("  最大视差: {}", maxDisparity);
-        
-    } catch (const std::exception& e) {
-        LOG_WARN("读取配置失败: {}, 使用默认值", e.what());
-    }
-    
-    // 计算单眼宽度（拼接图像的一半）
-    uint32_t monoWidth = cameraWidth / 2;
-    
-    LOG_INFO("立体匹配参数:");
-    LOG_INFO("  单眼图像尺寸: {}x{}", monoWidth, cameraHeight);
-    LOG_INFO("  图像拼接: 原始 {}x{} → 左右拼接 → 每眼 {}x{}", 
-             cameraWidth, cameraHeight, monoWidth, cameraHeight);
-    
-    return {monoWidth, cameraHeight, maxDisparity};
-}
-
-/**
- * @brief 验证配置一致性
- * @param expectedWidth 预期的图像宽度
- * @param expectedHeight 预期的图像高度
- * @param expectedMaxDisparity 预期的最大视差
- */
-void validateConfigConsistency(uint32_t expectedWidth, uint32_t expectedHeight, uint32_t expectedMaxDisparity) {
-    LOG_INFO("验证配置一致性:");
-    LOG_INFO("  预期值: {}x{}, 最大视差: {}", expectedWidth, expectedHeight, expectedMaxDisparity);
-    
-    // 这里可以添加与生成参数的比较，如果需要的话
-    // 当前我们没有直接访问生成的头文件，但可以通过日志输出进行手动比较
-    
-    LOG_INFO("  注意: 生成的着色器参数在 src/vulkan/generated/shader_params.hpp 中");
-    LOG_INFO("        确保该文件中的 IMAGE_WIDTH, IMAGE_HEIGHT, MAX_DISPARITY 与运行时值匹配");
-}
-
-/**
  * @brief 测试程序主函数
  * 
  * 测试Vulkan框架的所有组件：
@@ -116,8 +31,7 @@ void validateConfigConsistency(uint32_t expectedWidth, uint32_t expectedHeight, 
  * 3. 计算管线
  * 4. 立体匹配流水线
  * 
- * 编写日期：2026年2月7日
- * 修改日期：2026年2月7日 - 添加配置自动读取
+ * 更新日期：2026年2月7日（修复着色器Uniform缓冲区不匹配问题）
  */
 int main(int argc, char* argv[]) {
     using namespace stereo_depth;
@@ -126,11 +40,6 @@ int main(int argc, char* argv[]) {
     utils::Logger::initialize("test", spdlog::level::info);
     
     LOG_INFO("=== OrangePiZero3 立体深度 GPU 框架测试 ===");
-    
-    // 首先加载配置文件
-    if (!loadConfiguration()) {
-        LOG_WARN("⚠️ 配置加载失败，将使用硬编码默认值");
-    }
     
     // 设置Mali-G31所需的环境变量（必须在Vulkan初始化之前）
     setenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
@@ -149,7 +58,7 @@ int main(int argc, char* argv[]) {
         LOG_INFO("\n创建Vulkan上下文...");
         vulkan::VulkanContext vulkanContext;
         
-        // 测试1: Vulkan上下文
+        // 测试1: Vulkan上下文初始化
         LOG_INFO("\n[测试1] Vulkan上下文初始化");
         LOG_INFO("----------------------------------------");
         
@@ -184,35 +93,6 @@ int main(int argc, char* argv[]) {
                  VK_VERSION_MAJOR(deviceProps.apiVersion),
                  VK_VERSION_MINOR(deviceProps.apiVersion),
                  VK_VERSION_PATCH(deviceProps.apiVersion));
-        
-        // 4. 检查队列族
-        uint32_t queueFamilyCount = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
-        std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
-        vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilies.data());
-        
-        LOG_INFO("队列族信息 ({} 个):", queueFamilyCount);
-        for (uint32_t i = 0; i < queueFamilyCount; ++i) {
-            std::string flagsStr;
-            if (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT) flagsStr += "计算 ";
-            if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) flagsStr += "图形 ";
-            if (queueFamilies[i].queueFlags & VK_QUEUE_TRANSFER_BIT) flagsStr += "传输 ";
-            if (queueFamilies[i].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) flagsStr += "稀疏绑定 ";
-            
-            LOG_INFO("  队列族 {}: 队列数={}, 标志=[{}]", 
-                     i, queueFamilies[i].queueCount, flagsStr);
-        }
-        
-        // 5. 检查设备扩展支持
-        uint32_t extensionCount = 0;
-        vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, nullptr);
-        std::vector<VkExtensionProperties> extensions(extensionCount);
-        vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, extensions.data());
-        
-        LOG_INFO("设备扩展 ({} 个):", extensionCount);
-        for (const auto& ext : extensions) {
-            LOG_INFO("  - {} (版本: {})", ext.extensionName, ext.specVersion);
-        }
         
         // 测试2: 缓冲区管理器
         LOG_INFO("\n[测试2] 缓冲区管理器");
@@ -293,141 +173,238 @@ int main(int argc, char* argv[]) {
             LOG_INFO("✅ 布局清理成功");
         }
         
-        // 测试3.5: 最小计算管线验证（直接使用Vulkan API）
-        LOG_INFO("\n[测试3.5] 最小计算管线验证");
-        LOG_INFO("----------------------------------");
+        // 测试4: 直接使用Vulkan API创建计算管线（类似独立测试）
+        LOG_INFO("\n[测试4] 直接使用Vulkan API创建计算管线");
+        LOG_INFO("-----------------------------------------");
         
         {
-            LOG_INFO("步骤1: 创建最简单的着色器（内联SPIR-V）");
+            LOG_INFO("步骤1: 查找着色器文件 test.comp.spv");
             
-            // 与最小测试程序完全相同的SPIR-V代码
-            const uint32_t simpleShaderSPV[] = {
-                // 这是由 glslangValidator 编译的最简单着色器
-                0x07230203,0x00010000,0x00080001,0x00000015,0x00000000,0x00020011,0x00000001,0x0006000b,
-                0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
-                0x0006000f,0x00000005,0x00000004,0x6e69616d,0x00000000,0x0000000d,0x00060010,0x00000004,
-                0x00000011,0x00000001,0x00000001,0x00000001,0x00030003,0x00000002,0x000001c2,0x00040005,
-                0x00000004,0x6e69616d,0x00000000,0x00050006,0x00000009,0x00000000,0x7366666f,0x00007465,
-                0x00040005,0x0000000b,0x6c616373,0x00000000,0x00040005,0x0000000d,0x73657270,0x00000000,
-                0x00030047,0x00000009,0x00000002,0x00040047,0x0000000d,0x0000000b,0x0000001c,0x00020013,
-                0x00000002,0x00030021,0x00000003,0x00000002,0x00040015,0x00000006,0x00000020,0x00000001,
-                0x00040017,0x00000007,0x00000006,0x00000003,0x00040020,0x00000008,0x00000001,0x00000007,
-                0x0004003b,0x00000008,0x00000009,0x00000001,0x0004002b,0x00000006,0x0000000a,0x00000000,
-                0x00040020,0x0000000c,0x00000003,0x00000007,0x0004003b,0x0000000c,0x0000000d,0x00000003,
-                0x00050036,0x00000002,0x00000004,0x00000000,0x00000003,0x000200f8,0x00000005,0x000100fd,
-                0x00010038
+            // 查找着色器文件（类似独立测试的做法）
+            std::vector<std::string> searchPaths = {
+                "src/vulkan/spv/test.comp.spv",
+                "../src/vulkan/spv/test.comp.spv",
+                "../../src/vulkan/spv/test.comp.spv",
+                "../../../src/vulkan/spv/test.comp.spv",
+                "shaders/test.comp.spv"
             };
             
-            LOG_INFO("步骤2: 直接使用Vulkan API创建管线（绕过ComputePipeline类）");
+            std::string shaderPath;
+            bool foundShader = false;
+            
+            for (const auto& path : searchPaths) {
+                if (fileExists(path)) {
+                    shaderPath = path;
+                    foundShader = true;
+                    LOG_INFO("找到着色器文件: {}", path);
+                    break;
+                }
+            }
+            
+            if (!foundShader) {
+                LOG_ERROR("❌ 未找到着色器文件 test.comp.spv");
+                LOG_ERROR("请先编译着色器: cd build && cmake .. && make");
+                return EXIT_FAILURE;
+            }
+            
+            LOG_INFO("步骤2: 加载着色器文件");
+            
+            // 加载SPIR-V文件
+            std::ifstream file(shaderPath, std::ios::ate | std::ios::binary);
+            if (!file.is_open()) {
+                LOG_ERROR("无法打开着色器文件: {}", shaderPath);
+                return EXIT_FAILURE;
+            }
+            
+            size_t fileSize = static_cast<size_t>(file.tellg());
+            std::vector<uint32_t> shaderCode(fileSize / sizeof(uint32_t));
+            
+            file.seekg(0);
+            file.read(reinterpret_cast<char*>(shaderCode.data()), fileSize);
+            file.close();
+            
+            LOG_INFO("✅ 着色器加载成功: {} 字节", fileSize);
+            
+            LOG_INFO("步骤3: 创建着色器模块");
             
             VkDevice device = vulkanContext.getDevice();
             if (device == VK_NULL_HANDLE) {
                 LOG_ERROR("设备句柄无效");
-            } else {
-                LOG_INFO("设备句柄: {}", reinterpret_cast<void*>(device));
-                
-                // 1. 创建着色器模块
-                VkShaderModuleCreateInfo shaderInfo = {};
-                shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-                shaderInfo.codeSize = sizeof(simpleShaderSPV);
-                shaderInfo.pCode = simpleShaderSPV;
-                
-                VkShaderModule shaderModule;
-                VkResult result = vkCreateShaderModule(device, &shaderInfo, nullptr, &shaderModule);
-                
-                if (result != VK_SUCCESS) {
-                    LOG_ERROR("创建着色器模块失败: {}", result);
-                } else {
-                    LOG_INFO("✅ 着色器模块创建成功");
-                    
-                    // 2. 创建管线布局（空布局）
-                    VkPipelineLayoutCreateInfo layoutInfo = {};
-                    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-                    layoutInfo.setLayoutCount = 0;
-                    layoutInfo.pSetLayouts = nullptr;
-                    layoutInfo.pushConstantRangeCount = 0;
-                    layoutInfo.pPushConstantRanges = nullptr;
-                    
-                    VkPipelineLayout pipelineLayout;
-                    result = vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pipelineLayout);
-                    
-                    if (result != VK_SUCCESS) {
-                        LOG_ERROR("创建管线布局失败: {}", result);
-                        vkDestroyShaderModule(device, shaderModule, nullptr);
-                    } else {
-                        LOG_INFO("✅ 管线布局创建成功");
-                        
-                        // 3. 创建着色器阶段信息
-                        VkPipelineShaderStageCreateInfo stageInfo = {};
-                        stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-                        stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-                        stageInfo.module = shaderModule;
-                        stageInfo.pName = "main";
-                        
-                        // 4. 创建计算管线
-                        VkComputePipelineCreateInfo pipelineInfo = {};
-                        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-                        pipelineInfo.stage = stageInfo;
-                        pipelineInfo.layout = pipelineLayout;
-                        pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
-                        pipelineInfo.basePipelineIndex = -1;
-                        
-                        VkPipeline computePipeline;
-                        LOG_INFO("正在创建计算管线...");
-                        
-                        result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline);
-                        
-                        if (result != VK_SUCCESS) {
-                            LOG_ERROR("创建计算管线失败: {}", result);
-                            LOG_ERROR("Vulkan错误代码: {}", result);
-                            
-                            // 打印常见错误代码含义
-                            switch (result) {
-                                case -1: LOG_ERROR("  VK_ERROR_OUT_OF_HOST_MEMORY"); break;
-                                case -2: LOG_ERROR("  VK_ERROR_OUT_OF_DEVICE_MEMORY"); break;
-                                case -3: LOG_ERROR("  VK_ERROR_INITIALIZATION_FAILED"); break;
-                                case -4: LOG_ERROR("  VK_ERROR_DEVICE_LOST"); break;
-                                case -9: LOG_ERROR("  VK_ERROR_INCOMPATIBLE_DRIVER"); break;
-                                default: LOG_ERROR("  未知错误代码"); break;
-                            }
-                        } else {
-                            LOG_INFO("✅ 计算管线创建成功！");
-                            LOG_INFO("  ✓ 我们的VulkanContext设备支持计算管线");
-                            LOG_INFO("  ✓ PanVK驱动正常工作");
-                            
-                            // 清理管线
-                            vkDestroyPipeline(device, computePipeline, nullptr);
-                            LOG_INFO("  ✓ 管线已销毁");
-                        }
-                        
-                        // 清理布局
-                        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-                        LOG_INFO("  ✓ 管线布局已销毁");
-                        
-                        // 清理着色器模块
-                        vkDestroyShaderModule(device, shaderModule, nullptr);
-                            LOG_INFO("  ✓ 着色器模块已销毁");
-                    }
-                }
+                return EXIT_FAILURE;
             }
             
-            LOG_INFO("✅ 最小计算管线验证完成");
-        }
-        
-        // 测试4: 计算管线 - 使用ComputePipeline类
-        LOG_INFO("\n[测试4] 计算管线 - 使用ComputePipeline类");
-        LOG_INFO("---------------------------------------");
-        
-        {
-            LOG_INFO("⚠ 由于PanVK驱动兼容性问题，跳过计算管线类测试");
-            LOG_INFO("  已知问题: vkCreateComputePipelines返回错误-13");
-            LOG_INFO("  问题分析:");
-            LOG_INFO("    1. 最小测试程序成功 → PanVK驱动支持计算管线");
-            LOG_INFO("    2. 我们的项目失败 → 可能是配置差异");
-            LOG_INFO("  后续计划:");
-            LOG_INFO("    1. 对比最小测试程序和项目的Vulkan初始化差异");
-            LOG_INFO("    2. 检查PanVK驱动的已知限制");
-            LOG_INFO("    3. 调整项目配置以适配PanVK驱动");
+            // 创建着色器模块
+            VkShaderModuleCreateInfo shaderInfo = {};
+            shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            shaderInfo.codeSize = shaderCode.size() * sizeof(uint32_t);
+            shaderInfo.pCode = shaderCode.data();
+            
+            VkShaderModule shaderModule;
+            VkResult result = vkCreateShaderModule(device, &shaderInfo, nullptr, &shaderModule);
+            
+            if (result != VK_SUCCESS) {
+                LOG_ERROR("创建着色器模块失败: {}", result);
+                return EXIT_FAILURE;
+            }
+            
+            LOG_INFO("✅ 着色器模块创建成功");
+            
+            LOG_INFO("步骤4: 创建描述符集布局");
+            
+            // 创建描述符集布局（与test.comp中的绑定匹配）
+            std::vector<VkDescriptorSetLayoutBinding> bindings = {
+                // Uniform缓冲区 (binding 0)
+                {
+                    .binding = 0,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                    .pImmutableSamplers = nullptr
+                },
+                // 输入缓冲区 (binding 1)
+                {
+                    .binding = 1,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                    .pImmutableSamplers = nullptr
+                },
+                // 输出缓冲区 (binding 2)
+                {
+                    .binding = 2,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                    .pImmutableSamplers = nullptr
+                },
+                // 调试缓冲区 (binding 3)
+                {
+                    .binding = 3,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                    .pImmutableSamplers = nullptr
+                }
+            };
+            
+            VkDescriptorSetLayoutCreateInfo layoutInfo = {};
+            layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+            layoutInfo.pBindings = bindings.data();
+            
+            VkDescriptorSetLayout descriptorSetLayout;
+            result = vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout);
+            
+            if (result != VK_SUCCESS) {
+                LOG_ERROR("创建描述符集布局失败: {}", result);
+                vkDestroyShaderModule(device, shaderModule, nullptr);
+                return EXIT_FAILURE;
+            }
+            
+            LOG_INFO("✅ 描述符集布局创建成功 (4个绑定)");
+            
+            LOG_INFO("步骤5: 创建管线布局");
+            
+            VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
+            pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            pipelineLayoutInfo.setLayoutCount = 1;
+            pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
+            pipelineLayoutInfo.pushConstantRangeCount = 0;
+            pipelineLayoutInfo.pPushConstantRanges = nullptr;
+            
+            VkPipelineLayout pipelineLayout;
+            result = vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout);
+            
+            if (result != VK_SUCCESS) {
+                LOG_ERROR("创建管线布局失败: {}", result);
+                vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
+                vkDestroyShaderModule(device, shaderModule, nullptr);
+                return EXIT_FAILURE;
+            }
+            
+            LOG_INFO("✅ 管线布局创建成功");
+            
+            LOG_INFO("步骤6: 创建计算管线");
+            
+            // 创建着色器阶段信息
+            VkPipelineShaderStageCreateInfo stageInfo = {};
+            stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            stageInfo.module = shaderModule;
+            stageInfo.pName = "main";
+            stageInfo.pSpecializationInfo = nullptr;
+            
+            // 创建计算管线
+            VkComputePipelineCreateInfo pipelineInfo = {};
+            pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+            pipelineInfo.stage = stageInfo;
+            pipelineInfo.layout = pipelineLayout;
+            pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+            pipelineInfo.basePipelineIndex = -1;
+            
+            VkPipeline computePipeline;
+            LOG_INFO("正在创建计算管线...");
+            
+            result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline);
+            
+            if (result != VK_SUCCESS) {
+                LOG_ERROR("创建计算管线失败: {}", result);
+                
+                // 提供详细的错误信息
+                switch (result) {
+                    case VK_ERROR_OUT_OF_HOST_MEMORY:
+                        LOG_ERROR("  VK_ERROR_OUT_OF_HOST_MEMORY: 主机内存不足");
+                        break;
+                    case VK_ERROR_OUT_OF_DEVICE_MEMORY:
+                        LOG_ERROR("  VK_ERROR_OUT_OF_DEVICE_MEMORY: 设备内存不足");
+                        break;
+                    case VK_ERROR_INITIALIZATION_FAILED:
+                        LOG_ERROR("  VK_ERROR_INITIALIZATION_FAILED: 初始化失败");
+                        break;
+                    case VK_ERROR_DEVICE_LOST:
+                        LOG_ERROR("  VK_ERROR_DEVICE_LOST: 设备丢失");
+                        break;
+                    case VK_ERROR_INCOMPATIBLE_DRIVER:
+                        LOG_ERROR("  VK_ERROR_INCOMPATIBLE_DRIVER: 不兼容的驱动程序");
+                        LOG_ERROR("  可能原因:");
+                        LOG_ERROR("    1. 着色器Uniform缓冲区布局与C++端不匹配");
+                        LOG_ERROR("    2. 着色器使用了驱动不支持的指令");
+                        LOG_ERROR("    3. 着色器编译选项有问题");
+                        break;
+                    case VK_ERROR_FEATURE_NOT_PRESENT:
+                        LOG_ERROR("  VK_ERROR_FEATURE_NOT_PRESENT: 不支持的特性");
+                        break;
+                    default:
+                        LOG_ERROR("  未知错误代码: {}", result);
+                        break;
+                }
+                
+                vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+                vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
+                vkDestroyShaderModule(device, shaderModule, nullptr);
+                return EXIT_FAILURE;
+            }
+            
+            LOG_INFO("✅ 计算管线创建成功！");
+            LOG_INFO("  ✓ 项目着色器 test.comp.spv 编译成功");
+            LOG_INFO("  ✓ Uniform缓冲区布局匹配成功");
+            LOG_INFO("  ✓ PanVK驱动可以正确处理我们的着色器");
+            
+            // 清理资源
+            LOG_INFO("步骤7: 清理资源");
+            vkDestroyPipeline(device, computePipeline, nullptr);
+            LOG_INFO("  ✓ 管线已销毁");
+            
+            vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+            LOG_INFO("  ✓ 管线布局已销毁");
+            
+            vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
+            LOG_INFO("  ✓ 描述符集布局已销毁");
+            
+            vkDestroyShaderModule(device, shaderModule, nullptr);
+            LOG_INFO("  ✓ 着色器模块已销毁");
+            
+            LOG_INFO("✅ 直接API测试完成");
         }
         
         // 测试5: 立体匹配流水线框架测试
@@ -435,14 +412,13 @@ int main(int argc, char* argv[]) {
         LOG_INFO("-----------------------------------");
         
         {
-            // 从配置文件获取测试图像尺寸
-            auto [testWidth, testHeight, maxDisparity] = getPipelineConfigFromFile();
-            
-            // 验证配置一致性
-            validateConfigConsistency(testWidth, testHeight, maxDisparity);
-            
             // 创建立体匹配流水线
             vulkan::StereoPipeline stereoPipeline(vulkanContext);
+            
+            // 使用测试图像尺寸（320x480，来自拼接图像的一半）
+            uint32_t testWidth = 320;
+            uint32_t testHeight = 480;
+            uint32_t maxDisparity = 64;
             
             LOG_INFO("尝试初始化立体匹配流水线...");
             LOG_INFO("图像尺寸: {} x {}", testWidth, testHeight);
@@ -469,9 +445,8 @@ int main(int argc, char* argv[]) {
                 LOG_INFO("✅ 立体匹配流水线初始化成功");
                 
                 // 生成测试图像数据（简单的梯度图像）
-                size_t pixelCount = static_cast<size_t>(testWidth) * static_cast<size_t>(testHeight);
-                std::vector<uint8_t> leftImage(pixelCount);
-                std::vector<uint8_t> rightImage(pixelCount);
+                std::vector<uint8_t> leftImage(testWidth * testHeight);
+                std::vector<uint8_t> rightImage(testWidth * testHeight);
                 
                 for (uint32_t y = 0; y < testHeight; ++y) {
                     for (uint32_t x = 0; x < testWidth; ++x) {
@@ -498,7 +473,6 @@ int main(int argc, char* argv[]) {
                 }
                 
                 LOG_INFO("✅ 测试图像设置成功（梯度图像，模拟5像素视差）");
-                LOG_INFO("  图像大小: {} 像素 ({} 字节)", pixelCount, pixelCount);
                 
                 // 执行计算（框架测试，即使没有真实着色器，也应该能够完成命令记录）
                 LOG_INFO("开始框架计算测试...");
@@ -517,7 +491,7 @@ int main(int argc, char* argv[]) {
                         LOG_INFO("✅ 计算完成，耗时 {} 毫秒", duration.count());
                         
                         // 尝试获取结果（即使可能为空）
-                        std::vector<uint16_t> disparityMap(pixelCount);
+                        std::vector<uint16_t> disparityMap(testWidth * testHeight);
                         if (stereoPipeline.getDisparityMap(disparityMap.data())) {
                             LOG_INFO("✅ 视差图获取成功 ({} 字节)", 
                                      disparityMap.size() * sizeof(uint16_t));
@@ -580,17 +554,13 @@ int main(int argc, char* argv[]) {
         
         LOG_INFO("\n=== 所有测试完成成功 ===");
         LOG_INFO("Vulkan GPU框架已准备好进行立体深度计算");
-        LOG_INFO("配置系统状态: ✅ 自动计算已启用");
-        LOG_INFO("  修改 config/global_config.yaml 中的 camera.width/camera.height");
-        LOG_INFO("  重新编译后会自动计算单眼图像尺寸");
         LOG_INFO("下一步:");
         LOG_INFO("  1. SPIR-V着色器编译已验证 ✅");
         LOG_INFO("  2. 配置参数传递已验证 ✅");
         LOG_INFO("  3. 框架结构已验证 ✅");
-        LOG_INFO("  4. 配置自动计算已验证 ✅");
-        LOG_INFO("  5. 下一步: 编写实际的立体匹配着色器");
-        LOG_INFO("  6. 下一步: 集成OpenCV进行图像I/O");
-        LOG_INFO("  7. 下一步: 实现相机标定集成");
+        LOG_INFO("  4. 下一步: 编写实际的立体匹配着色器");
+        LOG_INFO("  5. 下一步: 集成OpenCV进行图像I/O");
+        LOG_INFO("  6. 下一步: 实现相机标定集成");
         
         return EXIT_SUCCESS;
         

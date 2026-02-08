@@ -139,3 +139,232 @@ if (condition) {
 ### 10.2 边界检查
 - 数组访问必须检查边界
 - 确保不越界访问
+
+OrangePiZero3-StereoDepth 着色器编写规范
+最后更新：2026年2月8日
+作者：C01-JNU
+1. 文件命名
+着色器文件使用小写字母，单词间用下划线分隔
+
+计算着色器：census_transform.comp, cost_calculation.comp
+
+后缀：.comp（计算着色器）
+
+编译后SPIR-V文件：census_transform.comp.spv
+
+2. 代码结构
+2.1 头部注释
+glsl
+#version 450
+// 着色器名称
+// 功能描述
+// 最后更新日期
+// 作者
+2.2 版本指令
+必须使用 #version 450（Vulkan要求的最低版本）
+
+2.3 工作组大小
+glsl
+layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y, local_size_z = 1) in;
+使用配置生成的工作组大小宏
+
+z维度固定为1
+
+2.4 Uniform缓冲区
+必须使用统一的 PipelineParams 结构体
+
+绑定位置：binding = 0
+
+必须使用 std140 布局
+
+结构体必须与C++端完全匹配
+
+2.5 缓冲区绑定
+输入缓冲区：binding = 1, 2, 3...
+
+输出缓冲区：binding = n, n+1...
+
+类型：readonly buffer 或 writeonly buffer
+
+3. 内存布局规则
+3.1 std140对齐规则
+标量（int, uint, float）：4字节对齐
+
+向量（vec2, vec3, vec4）：按元素大小对齐
+
+数组：每个元素按16字节对齐
+
+结构体：按最大成员对齐
+
+3.2 Uniform缓冲区结构体示例
+glsl
+layout(std140, binding = 0) uniform Parameters {
+    // 第1组（16字节对齐）
+    uint param1;    // 偏移0
+    uint param2;    // 偏移4
+    uint param3;    // 偏移8
+    uint param4;    // 偏移12
+    
+    // 第2组（16字节对齐）
+    float param5;   // 偏移16
+    float param6;   // 偏移20
+    uint param7;    // 偏移24
+    uint padding;   // 偏移28（补齐）
+} params;
+4. 编程规范
+4.1 变量命名
+Uniform变量：params.xxx
+
+局部变量：小驼峰命名法，例如：pixelIndex
+
+常量：全大写，下划线分隔，例如：MAX_ITERATIONS
+
+4.2 边界检查
+必须进行边界检查：
+
+glsl
+if (x >= IMAGE_WIDTH || y >= IMAGE_HEIGHT) {
+    return;
+}
+4.3 使用辅助宏
+必须使用生成的辅助宏：
+
+GET_PIXEL_INDEX(x, y)：获取像素索引
+
+IS_VALID_PIXEL(x, y)：检查像素有效性
+
+IS_FLAG_SET(flag)：检查标志位
+
+4.4 错误处理
+使用调试缓冲区输出错误信息
+
+第一个像素用于记录验证信息
+
+5. 性能优化
+5.1 内存访问
+使用局部变量缓存频繁访问的数据
+
+避免全局内存的随机访问
+
+使用向量化操作（vec4, vec8）
+
+5.2 计算优化
+减少分支语句
+
+使用整数运算代替浮点运算（如果精度允许）
+
+避免除法和模运算
+
+5.3 Mali-G31特定优化
+工作组大小：16x16（与硬件匹配）
+
+避免使用64位数据类型
+
+减少寄存器使用
+
+6. 调试和验证
+6.1 调试缓冲区
+每个着色器应包含调试缓冲区：
+
+glsl
+layout(binding = N) writeonly buffer DebugBuffer {
+    uint info[];
+} debugBuffer;
+6.2 验证机制
+检查编译时常量与Uniform值的一致性
+
+记录关键参数用于调试
+
+输出验证结果（成功/失败）
+
+7. 构建流程
+7.1 文件位置
+源文件：src/vulkan/shaders/
+
+SPIR-V输出：src/vulkan/spv/
+
+生成参数：src/vulkan/generated/
+
+7.2 编译命令
+bash
+# 重新生成配置
+python3 tools/generate_shader_config.py config/global_config.yaml
+
+# 重新编译着色器
+cd build
+cmake .. && make shaders
+8. 错误排查
+8.1 编译错误
+检查GLSL语法
+
+验证Uniform缓冲区对齐
+
+检查绑定冲突
+
+8.2 运行时错误
+验证缓冲区大小
+
+检查工作组调度
+
+验证数据一致性
+
+8.3 性能问题
+分析内存访问模式
+
+检查工作组大小
+
+优化算法复杂度
+
+9. 示例模板
+glsl
+#version 450
+// [着色器名称]
+// [功能描述]
+// 最后更新: [日期]
+
+// 编译时插入的参数宏
+layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y, local_size_z = 1) in;
+
+// Uniform缓冲区（必须与C++端匹配）
+layout(std140, binding = 0) uniform Parameters {
+    // ... 结构体成员
+} params;
+
+// 输入缓冲区
+layout(binding = 1) readonly buffer InputBuffer {
+    float data[];
+} inputBuffer;
+
+// 输出缓冲区  
+layout(binding = 2) writeonly buffer OutputBuffer {
+    float data[];
+} outputBuffer;
+
+// 调试缓冲区
+layout(binding = 3) writeonly buffer DebugBuffer {
+    uint info[];
+} debugBuffer;
+
+void main() {
+    // 边界检查
+    if (gl_GlobalInvocationID.x >= IMAGE_WIDTH || 
+        gl_GlobalInvocationID.y >= IMAGE_HEIGHT) {
+        return;
+    }
+    
+    // 计算逻辑
+    
+    // 调试信息（第一个像素）
+    if (GET_PIXEL_INDEX(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y) == 0) {
+        // 记录调试信息
+    }
+}
+10. 版本控制
+10.1 提交信息
+格式：[Shaders] 简短描述
+示例：[Shaders] 添加Census变换着色器
+
+10.2 文件更新
+更新着色器时，必须同时更新对应的C++结构体（如果Uniform缓冲区有变化）
+
+更新配置时，必须重新生成参数文件

@@ -1,0 +1,25 @@
+// minimal_test/2level/compute.comp
+#version 450
+
+// 多个绑定：存储缓冲区、uniform缓冲区
+layout(set = 0, binding = 0) buffer StorageBuffer {
+    uint data[];
+} storageBuffer;
+
+layout(set = 0, binding = 1) uniform UniformBuffer {
+    uint size;
+    float factor;
+} uniformBuffer;
+
+layout(set = 0, binding = 2) buffer StorageBuffer2 {
+    uint result[];  // ❌ 修改：将 'output' 改为 'result'
+} storageBuffer2;
+
+layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < uniformBuffer.size) {
+        storageBuffer2.result[idx] = storageBuffer.data[idx] * uint(uniformBuffer.factor);  // ❌ 同步修改
+    }
+}

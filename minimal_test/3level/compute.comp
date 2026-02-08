@@ -1,0 +1,26 @@
+// minimal_test/3level/compute.comp
+#version 450
+
+// 多个绑定
+layout(set = 0, binding = 0) buffer StorageBuffer {
+    uint data[];
+} storageBuffer;
+
+layout(set = 0, binding = 1) uniform UniformBuffer {
+    uint size;
+} uniformBuffer;
+
+// 推送常量
+layout(push_constant) uniform PushConstants {
+    float factor;
+    uint offset;
+} pushConstants;
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < uniformBuffer.size) {
+        storageBuffer.data[idx] = uint(float(idx + pushConstants.offset) * pushConstants.factor);
+    }
+}

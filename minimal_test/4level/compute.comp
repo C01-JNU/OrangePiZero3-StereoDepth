@@ -1,0 +1,22 @@
+// minimal_test/4level/compute.comp
+#version 450
+
+// 使用描述符集布局和存储缓冲区
+layout(set = 0, binding = 0) buffer StorageBuffer {
+    uint data[];
+} storageBuffer;
+
+// 使用推送常量
+layout(push_constant) uniform PushConstants {
+    uint elementCount;
+    uint multiplier;
+} push;
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < push.elementCount) {
+        storageBuffer.data[idx] = idx * push.multiplier;
+    }
+}
