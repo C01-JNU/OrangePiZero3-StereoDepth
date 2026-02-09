@@ -86,6 +86,9 @@ set_target_properties(stereo_depth_test PROPERTIES
 # 安装规则（可选）
 install(TARGETS stereo_depth DESTINATION bin)
 
+# 添加标定模块
+add_subdirectory(src/calibration)
+
 # 配置生成
 find_program(PYTHON3 python3)
 if(PYTHON3)
@@ -111,6 +114,7 @@ if(PYTHON3)
     # 添加到可执行文件依赖
     add_dependencies(stereo_depth generate_shader_params)
     add_dependencies(stereo_depth_test generate_shader_params)
+    add_dependencies(stereo_calibrator generate_shader_params)
     
     message(STATUS "Python3 found: 着色器参数生成启用")
 else()
@@ -169,6 +173,7 @@ if(GLSLANG_VALIDATOR)
         add_dependencies(compile_shaders generate_shader_params)
         add_dependencies(stereo_depth compile_shaders)
         add_dependencies(stereo_depth_test compile_shaders)
+        add_dependencies(stereo_calibrator compile_shaders)
         
         message(STATUS "Found glslangValidator: 着色器编译启用")
         message(STATUS "SPV输出目录: ${SPV_DIR}")
@@ -199,4 +204,5 @@ if(GLSLANG_VALIDATOR)
 else()
     message(STATUS "着色器编译: 禁用")
 endif()
+message(STATUS "标定工具: stereo_calibrator")
 message(STATUS "=========================================")

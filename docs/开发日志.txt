@@ -448,3 +448,14 @@ ROS2集成准备
 
 2-8
 现在没有段错误了，立体计算流水线也建立起来了，下一步就是修改test.cpp让流水线能用上images/test里面的图像进行计算，并输出结果到images/output文件夹里面了
+2-9
+将images/test接入了test.cpp的测试环节，改动了config.hpp/cpp和stereo_pipeline.cpp
+不过现在还没有将calibration_results/stereo_calibration.yml的数据妥善安置
+也没能解决输出视差全0的问题
+先搞标定参数，现在搞了个新的标定程序，不过现在.....
+[2026-02-09 15:51:33.126] [info] [stereo_calibrator] 启动立体标定工具
+[2026-02-09 15:51:33.126] [error] [stereo_calibrator] Config file does not exist: config/global_config.yaml
+[2026-02-09 15:51:33.126] [error] [stereo_calibrator] Failed to load global config from: config/global_config.yaml
+错误: 无法加载配置文件: config/global_config.yaml
+[2026-02-09 15:51:33.126] [error] [stereo_calibrator] 无法加载配置文件: config/global_config.yaml
+明天有事，后天再搞
