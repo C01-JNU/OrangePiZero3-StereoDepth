@@ -3,7 +3,8 @@
 sudo apt install libspdlog-dev
 
 注意:
-config/global_config.yaml中的参数只会在编译时应用，若修改了其参数，则请重新编译
-输入的双目图像应当是这样的格式：
+1.config/global_config.yaml中的参数只会在编译时应用，若修改了其参数，则请重新编译
+2.输入的双目图像应当是这样的格式：
 若双目摄像头输入图像总分辨率AxB，则单眼分辨率是(A/2)xB且应当是左右拼接的
 否则需要另设程序来转化
+3.请在项目根目录运行程序

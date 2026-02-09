@@ -11,8 +11,9 @@ namespace calibration {
 /**
  * @brief 立体相机标定器
  * 
- * 针对已经左右分好的320×480图像进行标定
+ * 针对已经左右分好的图像进行标定
  * 所有参数从配置文件读取
+ * 支持多分组大小优化标定
  */
 class StereoCalibrator {
 public:
@@ -24,7 +25,7 @@ public:
     StereoCalibrator& operator=(const StereoCalibrator&) = delete;
     
     /**
-     * @brief 执行立体标定
+     * @brief 执行立体标定（多分组优化）
      * @return 是否标定成功
      */
     bool calibrate();
@@ -59,14 +60,49 @@ private:
     bool detectChessboardCorners(const cv::Mat& image, std::vector<cv::Point2f>& corners);
     
     /**
-     * @brief 保存标定结果到YAML文件
+     * @brief 执行单组标定
+     * @param groupObjectPoints 物体点
+     * @param groupImagePointsLeft 左图像点
+     * @param groupImagePointsRight 右图像点
+     * @param cameraMatrixLeft 输出左相机内参
+     * @param distCoeffsLeft 输出左相机畸变
+     * @param cameraMatrixRight 输出右相机内参
+     * @param distCoeffsRight 输出右相机畸变
+     * @param R 输出旋转矩阵
+     * @param T 输出平移向量
+     * @param E 输出本质矩阵
+     * @param F 输出基础矩阵
+     * @param rms 输出RMS误差
+     * @return 是否标定成功
      */
-    bool saveCalibrationResults();
+    bool performGroupCalibration(
+        const std::vector<std::vector<cv::Point3f>>& groupObjectPoints,
+        const std::vector<std::vector<cv::Point2f>>& groupImagePointsLeft,
+        const std::vector<std::vector<cv::Point2f>>& groupImagePointsRight,
+        cv::Mat& cameraMatrixLeft, cv::Mat& distCoeffsLeft,
+        cv::Mat& cameraMatrixRight, cv::Mat& distCoeffsRight,
+        cv::Mat& R, cv::Mat& T, cv::Mat& E, cv::Mat& F,
+        double& rms);
+    
+    /**
+     * @brief 保存标定结果到YAML文件
+     * @param bestGroupSize 最佳分组大小
+     * @param bestGroupIndex 最佳组号
+     * @param bestGroupIndices 最佳组图像索引
+     * @return 是否保存成功
+     */
+    bool saveCalibrationResults(int bestGroupSize, int bestGroupIndex, 
+                               const std::vector<int>& bestGroupIndices);
     
     /**
      * @brief 生成标定报告
+     * @param bestGroupSize 最佳分组大小
+     * @param bestGroupIndex 最佳组号
+     * @param bestGroupIndices 最佳组图像索引
+     * @return 是否生成成功
      */
-    bool generateCalibrationReport();
+    bool generateCalibrationReport(int bestGroupSize, int bestGroupIndex,
+                                  const std::vector<int>& bestGroupIndices);
     
     /**
      * @brief 验证标定结果（生成校正后的图像）
@@ -105,11 +141,6 @@ private:
     std::string m_calibrationDir;
     std::string m_outputDir;
     std::string m_configFile;
-    
-    // 标定过程中收集的数据
-    std::vector<std::vector<cv::Point3f>> m_objectPoints;
-    std::vector<std::vector<cv::Point2f>> m_imagePointsLeft;
-    std::vector<std::vector<cv::Point2f>> m_imagePointsRight;
 };
 
 } // namespace calibration

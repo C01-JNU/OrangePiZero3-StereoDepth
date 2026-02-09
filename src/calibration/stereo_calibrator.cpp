@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <unistd.h>
+#include <cmath>
 
 namespace stereo_depth {
 namespace calibration {
@@ -84,13 +85,15 @@ bool StereoCalibrator::calibrate() {
         }
     }
     
-    // 4. 处理每对标定图像
-    int validPairs = 0;
-    m_objectPoints.clear();
-    m_imagePointsLeft.clear();
-    m_imagePointsRight.clear();
+    // 4. 处理每对标定图像，收集角点数据
+    std::vector<std::vector<cv::Point2f>> allImagePointsLeft;
+    std::vector<std::vector<cv::Point2f>> allImagePointsRight;
+    std::vector<int> validImageIndices;
     
-    for (size_t i = 0; i < imagePairs.size(); ++i) {
+    int totalPairs = static_cast<int>(imagePairs.size());
+    int validPairs = 0;
+    
+    for (int i = 0; i < totalPairs; ++i) {
         const auto& [leftPath, rightPath] = imagePairs[i];
         
         // 读取左右图像
@@ -122,9 +125,9 @@ bool StereoCalibrator::calibrate() {
                            cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.01));
             
             // 保存数据
-            m_objectPoints.push_back(objectPattern);
-            m_imagePointsLeft.push_back(leftCorners);
-            m_imagePointsRight.push_back(rightCorners);
+            allImagePointsLeft.push_back(leftCorners);
+            allImagePointsRight.push_back(rightCorners);
+            validImageIndices.push_back(i);
             validPairs++;
             
             LOG_DEBUG("图像对 {}: 检测到 {}x{} 个角点", 
@@ -136,64 +139,159 @@ bool StereoCalibrator::calibrate() {
         // 每处理10对输出一次进度
         if ((i + 1) % 10 == 0) {
             LOG_INFO("已处理 {}/{} 对图像，有效 {} 对", 
-                    i + 1, imagePairs.size(), validPairs);
+                    i + 1, totalPairs, validPairs);
         }
     }
     
-    LOG_INFO("角点检测完成，有效图像对: {}/{}", validPairs, imagePairs.size());
-    m_imagesUsed = validPairs;
+    LOG_INFO("角点检测完成，有效图像对: {}/{}", validPairs, totalPairs);
     
     if (validPairs < 10) {
         LOG_ERROR("有效图像对不足，至少需要10对，当前只有 {} 对", validPairs);
         return false;
     }
     
-    // 5. 执行立体标定
-    LOG_INFO("开始立体标定...");
+    // 5. 多分组大小优化标定
+    LOG_INFO("开始多分组大小优化标定...");
     
-    // 初始化相机矩阵
-    m_cameraMatrixLeft = cv::Mat::eye(3, 3, CV_64F);
-    m_cameraMatrixRight = cv::Mat::eye(3, 3, CV_64F);
+    // 准备物体点
+    std::vector<std::vector<cv::Point3f>> allObjectPoints(validPairs, objectPattern);
     
-    // 使用完整5个畸变系数 (k1, k2, p1, p2, k3)
-    m_distCoeffsLeft = cv::Mat::zeros(5, 1, CV_64F);
-    m_distCoeffsRight = cv::Mat::zeros(5, 1, CV_64F);
+    // 定义不同的分组大小（基于总图像数量的比例）
+    std::vector<int> groupSizes;
+    int validImageCount = validPairs;
     
-    // 执行立体标定
-    std::vector<cv::Mat> rvecsLeft, tvecsLeft, rvecsRight, tvecsRight;
-    m_rmsError = cv::stereoCalibrate(
-        m_objectPoints,            // 物体点
-        m_imagePointsLeft,         // 左图像点
-        m_imagePointsRight,        // 右图像点
-        m_cameraMatrixLeft,        // 左相机内参
-        m_distCoeffsLeft,          // 左相机畸变
-        m_cameraMatrixRight,       // 右相机内参
-        m_distCoeffsRight,         // 右相机畸变
-        m_imageSize,               // 图像尺寸
-        m_rotationMatrix,          // 旋转矩阵
-        m_translationVector,       // 平移向量
-        m_essentialMatrix,         // 本质矩阵
-        m_fundamentalMatrix,       // 基础矩阵
-        cv::CALIB_USE_INTRINSIC_GUESS | cv::CALIB_FIX_ASPECT_RATIO,
-        cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 100, 1e-6)
-    );
+    // 计算不同的分组大小
+    std::vector<double> ratios = {1.0/3, 1.0/4, 1.0/5, 1.0/6, 1.0/7, 1.0/8};
+    for (double ratio : ratios) {
+        int groupSize = static_cast<int>(std::round(validImageCount * ratio));
+        if (groupSize >= 10 && groupSize <= validImageCount) {  // 每组至少10张，不超过总数
+            groupSizes.push_back(groupSize);
+        }
+    }
     
-    LOG_INFO("立体标定完成，RMS误差: {}", m_rmsError);
+    // 去重并排序
+    std::sort(groupSizes.begin(), groupSizes.end());
+    groupSizes.erase(std::unique(groupSizes.begin(), groupSizes.end()), groupSizes.end());
     
-    // 6. 计算立体校正参数
+    LOG_INFO("将尝试以下分组大小: ");
+    for (int size : groupSizes) {
+        LOG_INFO("  {}", size);
+    }
+    
+    // 存储最佳结果
+    double bestRms = 1e10;
+    cv::Mat bestCameraMatrixLeft, bestDistCoeffsLeft;
+    cv::Mat bestCameraMatrixRight, bestDistCoeffsRight;
+    cv::Mat bestR, bestT, bestE, bestF;
+    int bestGroupSize = -1;
+    int bestGroupIndex = -1;
+    std::vector<int> bestGroupIndices;
+    
+    // 对每个分组大小进行标定
+    for (int groupSize : groupSizes) {
+        LOG_INFO("=== 尝试分组大小: {} ===", groupSize);
+        
+        int groupCount = (validImageCount + groupSize - 1) / groupSize; // 向上取整
+        LOG_INFO("将分为 {} 组", groupCount);
+        
+        // 对每组进行标定
+        for (int group = 0; group < groupCount; group++) {
+            int startIdx = group * groupSize;
+            int endIdx = std::min((group + 1) * groupSize, validImageCount);
+            int groupImageCount = endIdx - startIdx;
+            
+            // 跳过图像数太少的组
+            if (groupImageCount < 10) {
+                LOG_INFO("跳过第 {} 组 (只有 {} 张图像)", group + 1, groupImageCount);
+                continue;
+            }
+            
+            LOG_INFO("=== 标定第 {} 组 ===", group + 1);
+            LOG_INFO("图像范围: {} - {} ({} 张)", startIdx + 1, endIdx, groupImageCount);
+            
+            // 提取当前组的标定数据
+            std::vector<std::vector<cv::Point3f>> groupObjectPoints;
+            std::vector<std::vector<cv::Point2f>> groupImagePointsLeft;
+            std::vector<std::vector<cv::Point2f>> groupImagePointsRight;
+            
+            for (int i = startIdx; i < endIdx; i++) {
+                groupObjectPoints.push_back(allObjectPoints[i]);
+                groupImagePointsLeft.push_back(allImagePointsLeft[i]);
+                groupImagePointsRight.push_back(allImagePointsRight[i]);
+            }
+            
+            // 执行标定
+            cv::Mat cameraMatrixLeft, distCoeffsLeft;
+            cv::Mat cameraMatrixRight, distCoeffsRight;
+            cv::Mat R, T, E, F;
+            double rms = 0.0;
+            
+            bool success = performGroupCalibration(groupObjectPoints, groupImagePointsLeft,
+                                                 groupImagePointsRight, cameraMatrixLeft, distCoeffsLeft,
+                                                 cameraMatrixRight, distCoeffsRight, R, T, E, F, rms);
+            
+            if (success && rms < bestRms) {
+                bestRms = rms;
+                bestCameraMatrixLeft = cameraMatrixLeft.clone();
+                bestDistCoeffsLeft = distCoeffsLeft.clone();
+                bestCameraMatrixRight = cameraMatrixRight.clone();
+                bestDistCoeffsRight = distCoeffsRight.clone();
+                bestR = R.clone();
+                bestT = T.clone();
+                bestE = E.clone();
+                bestF = F.clone();
+                bestGroupSize = groupSize;
+                bestGroupIndex = group + 1;
+                
+                // 保存最佳组的图像索引
+                bestGroupIndices.clear();
+                for (int i = startIdx; i < endIdx; i++) {
+                    bestGroupIndices.push_back(validImageIndices[i]);
+                }
+                
+                LOG_INFO("  -> 更新最佳结果! RMS = {}", rms);
+                LOG_INFO("     分组大小: {}, 组号: {}", bestGroupSize, bestGroupIndex);
+            }
+        }
+    }
+    
+    if (bestGroupSize == -1) {
+        LOG_ERROR("所有分组标定均失败");
+        return false;
+    }
+    
+    LOG_INFO("=== 最佳结果 ===");
+    LOG_INFO("最佳RMS误差: {}", bestRms);
+    LOG_INFO("来自分组大小: {}, 组号: {}", bestGroupSize, bestGroupIndex);
+    LOG_INFO("使用图像范围: {} - {}", bestGroupIndices.front() + 1, bestGroupIndices.back() + 1);
+    LOG_INFO("使用图像数量: {}", bestGroupIndices.size());
+    
+    // 6. 使用最佳结果计算立体校正参数
     LOG_INFO("计算立体校正参数...");
     cv::Rect validRoi[2];
     cv::stereoRectify(
-        m_cameraMatrixLeft, m_distCoeffsLeft,
-        m_cameraMatrixRight, m_distCoeffsRight,
+        bestCameraMatrixLeft, bestDistCoeffsLeft,
+        bestCameraMatrixRight, bestDistCoeffsRight,
         m_imageSize,
-        m_rotationMatrix, m_translationVector,
+        bestR, bestT,
         m_rectificationTransformLeft, m_rectificationTransformRight,
         m_projectionMatrixLeft, m_projectionMatrixRight,
         m_disparityToDepthMappingMatrix,
         cv::CALIB_ZERO_DISPARITY, 1, m_imageSize,
         &validRoi[0], &validRoi[1]
     );
+    
+    // 保存最佳结果到成员变量
+    m_cameraMatrixLeft = bestCameraMatrixLeft;
+    m_distCoeffsLeft = bestDistCoeffsLeft;
+    m_cameraMatrixRight = bestCameraMatrixRight;
+    m_distCoeffsRight = bestDistCoeffsRight;
+    m_rotationMatrix = bestR;
+    m_translationVector = bestT;
+    m_essentialMatrix = bestE;
+    m_fundamentalMatrix = bestF;
+    m_rmsError = bestRms;
+    m_imagesUsed = static_cast<int>(bestGroupIndices.size());
     
     // 7. 计算校正映射
     cv::initUndistortRectifyMap(
@@ -211,13 +309,13 @@ bool StereoCalibrator::calibrate() {
     LOG_INFO("校正参数计算完成");
     
     // 8. 保存标定结果
-    if (!saveCalibrationResults()) {
+    if (!saveCalibrationResults(bestGroupSize, bestGroupIndex, bestGroupIndices)) {
         LOG_ERROR("保存标定结果失败");
         return false;
     }
     
     // 9. 生成标定报告
-    if (!generateCalibrationReport()) {
+    if (!generateCalibrationReport(bestGroupSize, bestGroupIndex, bestGroupIndices)) {
         LOG_WARN("生成标定报告失败");
     }
     
@@ -231,9 +329,56 @@ bool StereoCalibrator::calibrate() {
     LOG_INFO("  RMS误差: {}", m_rmsError);
     LOG_INFO("  使用图像: {} 对", m_imagesUsed);
     LOG_INFO("  基线长度: {:.4f} 米", cv::norm(m_translationVector));
+    LOG_INFO("  分组大小: {}, 组号: {}", bestGroupSize, bestGroupIndex);
     LOG_INFO("  标定文件: {}/stereo_calibration.yml", m_outputDir);
     
     return true;
+}
+
+bool StereoCalibrator::performGroupCalibration(
+    const std::vector<std::vector<cv::Point3f>>& groupObjectPoints,
+    const std::vector<std::vector<cv::Point2f>>& groupImagePointsLeft,
+    const std::vector<std::vector<cv::Point2f>>& groupImagePointsRight,
+    cv::Mat& cameraMatrixLeft, cv::Mat& distCoeffsLeft,
+    cv::Mat& cameraMatrixRight, cv::Mat& distCoeffsRight,
+    cv::Mat& R, cv::Mat& T, cv::Mat& E, cv::Mat& F,
+    double& rms) {
+    
+    try {
+        // 初始化相机矩阵和畸变系数 - 使用完整5个系数
+        cameraMatrixLeft = cv::Mat::eye(3, 3, CV_64F);
+        cameraMatrixRight = cv::Mat::eye(3, 3, CV_64F);
+        distCoeffsLeft = cv::Mat::zeros(5, 1, CV_64F);   // 使用完整5个畸变系数
+        distCoeffsRight = cv::Mat::zeros(5, 1, CV_64F);  // 使用完整5个畸变系数
+        
+        // 单目标定 - 使用完整参数
+        std::vector<cv::Mat> rvecsLeft, tvecsLeft;
+        double rmsLeft = cv::calibrateCamera(groupObjectPoints, groupImagePointsLeft, m_imageSize, 
+                                           cameraMatrixLeft, distCoeffsLeft, rvecsLeft, tvecsLeft);
+        
+        std::vector<cv::Mat> rvecsRight, tvecsRight;
+        double rmsRight = cv::calibrateCamera(groupObjectPoints, groupImagePointsRight, m_imageSize, 
+                                            cameraMatrixRight, distCoeffsRight, rvecsRight, tvecsRight);
+        
+        LOG_DEBUG("  - 单目标定RMS: 左={}, 右={}", rmsLeft, rmsRight);
+        
+        // 双目标定 - 使用完整参数，自动优化
+        int stereoFlags = cv::CALIB_USE_INTRINSIC_GUESS;  // 使用初始猜测，但不固定任何参数
+        
+        rms = cv::stereoCalibrate(groupObjectPoints, groupImagePointsLeft, groupImagePointsRight,
+                                 cameraMatrixLeft, distCoeffsLeft,
+                                 cameraMatrixRight, distCoeffsRight,
+                                 m_imageSize, R, T, E, F,
+                                 stereoFlags,
+                                 cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 200, 1e-6));
+        
+        LOG_DEBUG("  - 双目标定RMS: {}", rms);
+        
+        return true;
+    } catch (const std::exception& e) {
+        LOG_ERROR("  - 标定失败: {}", e.what());
+        return false;
+    }
 }
 
 bool StereoCalibrator::loadConfiguration() {
@@ -490,7 +635,8 @@ bool StereoCalibrator::detectChessboardCorners(const cv::Mat& image, std::vector
     return found;
 }
 
-bool StereoCalibrator::saveCalibrationResults() {
+bool StereoCalibrator::saveCalibrationResults(int bestGroupSize, int bestGroupIndex, 
+                                             const std::vector<int>& bestGroupIndices) {
     std::string outputFile = m_outputDir + "/stereo_calibration.yml";
     
     try {
@@ -500,14 +646,22 @@ bool StereoCalibrator::saveCalibrationResults() {
             return false;
         }
         
-        // 写入标定时间
-        fs << "calibration_date" << __DATE__ << " " << __TIME__;
+        // 写入标定时间（使用安全的键名）
+        std::string dateStr = __DATE__;
+        std::string timeStr = __TIME__;
+        std::string dateTime = dateStr + "_" + timeStr;
+        std::replace(dateTime.begin(), dateTime.end(), ' ', '_');
+        std::replace(dateTime.begin(), dateTime.end(), ':', '_');
+        
+        fs << "calibration_date" << dateTime;
         fs << "image_width" << m_imageSize.width;
         fs << "image_height" << m_imageSize.height;
         fs << "board_width" << m_boardSize.width;
         fs << "board_height" << m_boardSize.height;
         fs << "square_size" << m_squareSize;
         fs << "images_used" << m_imagesUsed;
+        fs << "best_group_size" << bestGroupSize;
+        fs << "best_group_index" << bestGroupIndex;
         
         // 写入标定参数
         fs << "camera_matrix_left" << m_cameraMatrixLeft;
@@ -533,13 +687,19 @@ bool StereoCalibrator::saveCalibrationResults() {
         LOG_INFO("标定结果已保存到: {}", outputFile);
         return true;
         
+    } catch (const cv::Exception& e) {
+        LOG_ERROR("OpenCV保存标定结果时发生异常: {}", e.what());
+        LOG_ERROR("错误代码: {}", e.code);
+        LOG_ERROR("请检查键名是否合法（必须以字母或下划线开头）");
+        return false;
     } catch (const std::exception& e) {
         LOG_ERROR("保存标定结果时发生异常: {}", e.what());
         return false;
     }
 }
 
-bool StereoCalibrator::generateCalibrationReport() {
+bool StereoCalibrator::generateCalibrationReport(int bestGroupSize, int bestGroupIndex,
+                                                const std::vector<int>& bestGroupIndices) {
     std::string reportFile = m_outputDir + "/calibration_report.txt";
     
     try {
@@ -558,13 +718,19 @@ bool StereoCalibrator::generateCalibrationReport() {
         report << "   图像尺寸: " << m_imageSize.width << "x" << m_imageSize.height << "\n";
         report << "   棋盘格尺寸: " << m_boardSize.width << "x" << m_boardSize.height << " 内角点\n";
         report << "   方格物理尺寸: " << m_squareSize << " 米\n";
-        report << "   使用图像数量: " << m_imagesUsed << " 对\n\n";
+        report << "   总有效图像: " << bestGroupIndices.size() << " 对\n\n";
         
-        report << "2. 标定结果\n";
+        report << "2. 多分组优化结果\n";
+        report << "   最佳分组大小: " << bestGroupSize << "\n";
+        report << "   最佳组号: " << bestGroupIndex << "\n";
+        report << "   使用图像范围: " << bestGroupIndices.front() + 1 << " - " << bestGroupIndices.back() + 1 << "\n";
+        report << "   使用图像数量: " << bestGroupIndices.size() << " 对\n\n";
+        
+        report << "3. 标定结果\n";
         report << "   RMS误差: " << std::fixed << std::setprecision(6) << m_rmsError << "\n";
         report << "   基线长度: " << cv::norm(m_translationVector) << " 米\n\n";
         
-        report << "3. 左相机内参矩阵\n";
+        report << "4. 左相机内参矩阵\n";
         for (int i = 0; i < 3; ++i) {
             report << "   [";
             for (int j = 0; j < 3; ++j) {
@@ -576,7 +742,7 @@ bool StereoCalibrator::generateCalibrationReport() {
         }
         report << "\n";
         
-        report << "4. 右相机内参矩阵\n";
+        report << "5. 右相机内参矩阵\n";
         for (int i = 0; i < 3; ++i) {
             report << "   [";
             for (int j = 0; j < 3; ++j) {
@@ -588,7 +754,7 @@ bool StereoCalibrator::generateCalibrationReport() {
         }
         report << "\n";
         
-        report << "5. 立体参数\n";
+        report << "6. 立体参数\n";
         report << "   旋转矩阵 R:\n";
         for (int i = 0; i < 3; ++i) {
             report << "   [";
@@ -609,10 +775,26 @@ bool StereoCalibrator::generateCalibrationReport() {
         }
         report << "]\n\n";
         
-        report << "6. 文件位置\n";
+        report << "7. 文件位置\n";
         report << "   标定参数: " << m_outputDir << "/stereo_calibration.yml\n";
         report << "   标定图像: " << m_calibrationDir << "\n";
         report << "   生成时间: " << __DATE__ << " " << __TIME__ << "\n";
+        
+        report << "\n8. 使用图像列表\n";
+        report << "   分组大小: " << bestGroupSize << ", 组号: " << bestGroupIndex << "\n";
+        report << "   RMS误差: " << m_rmsError << "\n";
+        report << "   图像范围: " << bestGroupIndices.front() + 1 << " - " << bestGroupIndices.back() + 1 << "\n";
+        report << "   图像数量: " << bestGroupIndices.size() << "\n\n";
+        
+        // 每行显示5个图像编号，便于阅读
+        for (size_t i = 0; i < bestGroupIndices.size(); i++) {
+            report << "图像对 " << std::setw(3) << bestGroupIndices[i] + 1;
+            if ((i + 1) % 5 == 0 || i == bestGroupIndices.size() - 1) {
+                report << "\n";
+            } else {
+                report << ", ";
+            }
+        }
         
         report.close();
         
