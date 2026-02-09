@@ -11,7 +11,7 @@ namespace utils {
 
 class Config {
 public:
-    using Value = std::variant<int, float, double, bool, std::string>;
+    using Value = std::variant<int, unsigned int, float, double, bool, std::string>;
     
     Config() = default;
     ~Config() = default;

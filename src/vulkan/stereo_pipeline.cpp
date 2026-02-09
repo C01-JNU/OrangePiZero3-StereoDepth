@@ -165,14 +165,40 @@ bool StereoPipeline::initialize(uint32_t imageWidth, uint32_t imageHeight, uint3
         params.compressedImageWidth = m_compressedImageWidth;   // 对应着色器imageWidth
         params.compressedImageHeight = m_compressedImageHeight; // 对应着色器imageHeight
         params.maxDisparity = m_maxDisparity;
-        params.windowSize = 9; // 默认窗口大小
-        params.uniquenessRatio = 0.15f; // 从配置文件读取
-        params.penaltyP1 = 8.0f;
-        params.penaltyP2 = 32.0f;
+        
+        // 从配置管理器获取算法参数
+        try {
+            auto& configManager = utils::ConfigManager::getInstance();
+            const auto& config = configManager.getConfig();
+            
+            // 从配置文件读取所有参数，不硬编码
+            params.windowSize = config.get<uint32_t>("stereo.window_size", 9);
+            float uniquenessRatioPercent = config.get<float>("stereo.uniqueness_ratio", 15.0f);
+            params.uniquenessRatio = uniquenessRatioPercent / 100.0f; // 百分比转小数
+            params.penaltyP1 = config.get<float>("stereo.penalty_p1", 8.0f);
+            params.penaltyP2 = config.get<float>("stereo.penalty_p2", 32.0f);
+            params.speckleWindow = config.get<uint32_t>("stereo.speckle_window_size", 100);
+            params.speckleRange = config.get<uint32_t>("stereo.speckle_range", 32);
+            params.medianSize = config.get<uint32_t>("stereo.median_filter_size", 3);
+            
+            LOG_INFO("从配置文件读取的参数:");
+            LOG_INFO("  窗口大小: {}", params.windowSize);
+            LOG_INFO("  唯一性比率: {}% -> {:.3f}", uniquenessRatioPercent, params.uniquenessRatio);
+            LOG_INFO("  惩罚参数: P1={}, P2={}", params.penaltyP1, params.penaltyP2);
+            
+        } catch (const std::exception& e) {
+            LOG_WARN("无法从配置读取参数，使用默认值: {}", e.what());
+            // 使用默认值
+            params.windowSize = 9;
+            params.uniquenessRatio = 0.15f;
+            params.penaltyP1 = 8.0f;
+            params.penaltyP2 = 32.0f;
+            params.speckleWindow = 100;
+            params.speckleRange = 32;
+            params.medianSize = 3;
+        }
+        
         params.flags = 0;
-        params.speckleWindow = 100;
-        params.speckleRange = 32;
-        params.medianSize = 3;
         params.padding[0] = 0; // 着色器使用的padding
         params.padding[1] = 0;
         params.padding[2] = 0;
@@ -201,9 +227,11 @@ bool StereoPipeline::setLeftImage(const uint8_t* data) {
         return false;
     }
     
-    size_t imageBytes = static_cast<size_t>(m_originalImageWidth) * 
-                       static_cast<size_t>(m_originalImageHeight) * sizeof(uint8_t);
-    LOG_DEBUG("设置左图像数据: {} 字节", imageBytes);
+    // 使用压缩后尺寸计算字节数（320×480）
+    size_t imageBytes = static_cast<size_t>(m_compressedImageWidth) * 
+                       static_cast<size_t>(m_compressedImageHeight) * sizeof(uint8_t);
+    LOG_DEBUG("设置左图像数据: {} 字节 ({}x{})", 
+              imageBytes, m_compressedImageWidth, m_compressedImageHeight);
     return m_leftImageBuffer->copyToBuffer(data, imageBytes);
 }
 
@@ -213,9 +241,11 @@ bool StereoPipeline::setRightImage(const uint8_t* data) {
         return false;
     }
     
-    size_t imageBytes = static_cast<size_t>(m_originalImageWidth) * 
-                       static_cast<size_t>(m_originalImageHeight) * sizeof(uint8_t);
-    LOG_DEBUG("设置右图像数据: {} 字节", imageBytes);
+    // 使用压缩后尺寸计算字节数（320×480）
+    size_t imageBytes = static_cast<size_t>(m_compressedImageWidth) * 
+                       static_cast<size_t>(m_compressedImageHeight) * sizeof(uint8_t);
+    LOG_DEBUG("设置右图像数据: {} 字节 ({}x{})", 
+              imageBytes, m_compressedImageWidth, m_compressedImageHeight);
     return m_rightImageBuffer->copyToBuffer(data, imageBytes);
 }
 
@@ -228,13 +258,13 @@ bool StereoPipeline::compute() {
     LOG_INFO("开始立体匹配计算");
     
     try {
-        // 步骤0: 压缩并拼接左右图像
-        LOG_INFO("步骤0: 压缩并拼接左右图像");
+        // 步骤0: 拼接左右图像（不压缩）
+        LOG_INFO("步骤0: 拼接左右图像");
         if (!compressAndStitchImages()) {
-            LOG_ERROR("图像压缩拼接失败");
+            LOG_ERROR("图像拼接失败");
             return false;
         }
-        LOG_INFO("✅ 图像压缩拼接完成");
+        LOG_INFO("✅ 图像拼接完成");
         
         // 步骤1: Census变换（双输出版本）
         LOG_INFO("步骤1: Census变换（双输出）");
@@ -349,6 +379,7 @@ bool StereoPipeline::createBuffers() {
     size_t compressedPixelCount = static_cast<size_t>(m_compressedImageWidth) * 
                                  static_cast<size_t>(m_compressedImageHeight);
     
+    size_t compressedImageBytes = compressedPixelCount * sizeof(uint8_t); // 单眼图像字节数
     size_t stitchedImageBytes = compressedPixelCount * 2 * sizeof(uint8_t); // 拼接图像：2×压缩图像
     size_t censusBufferBytes = compressedPixelCount * 2 * sizeof(uint32_t); // Census描述符：每个像素2个uint32_t
     size_t debugBufferBytes = 8 * sizeof(uint32_t);        // 调试缓冲区：8个uint32_t
@@ -359,7 +390,7 @@ bool StereoPipeline::createBuffers() {
     LOG_INFO("缓冲区大小计算:");
     LOG_INFO("  原始图像: {}x{} = {} 像素", m_originalImageWidth, m_originalImageHeight, originalPixelCount);
     LOG_INFO("  压缩后图像: {}x{} = {} 像素", m_compressedImageWidth, m_compressedImageHeight, compressedPixelCount);
-    LOG_INFO("  原始图像缓冲区: {} 字节 ({} KB)", originalImageBytes, originalImageBytes/1024);
+    LOG_INFO("  单眼图像缓冲区: {} 字节 ({} KB)", compressedImageBytes, compressedImageBytes/1024);
     LOG_INFO("  拼接图像缓冲区: {} 字节 ({} KB)", stitchedImageBytes, stitchedImageBytes/1024);
     LOG_INFO("  Census缓冲区: {} 字节 ({} KB)", censusBufferBytes, censusBufferBytes/1024);
     LOG_INFO("  代价体缓冲区: {} 字节 ({} MB)", costVolumeBytes, costVolumeBytes/(1024*1024));
@@ -367,23 +398,23 @@ bool StereoPipeline::createBuffers() {
     LOG_INFO("  临时缓冲区: {} 字节 ({} KB)", tempBufferBytes, tempBufferBytes/1024);
     
     try {
-        // 左图像缓冲区（原始尺寸）
+        // 左图像缓冲区（压缩后尺寸 - 320×480）
         m_leftImageBuffer = std::make_unique<BufferManager>(m_context);
-        if (!m_leftImageBuffer->createStorageBuffer(originalImageBytes)) {
-            LOG_ERROR("创建左图像缓冲区失败 ({} 字节)", originalImageBytes);
+        if (!m_leftImageBuffer->createStorageBuffer(compressedImageBytes)) {
+            LOG_ERROR("创建左图像缓冲区失败 ({} 字节)", compressedImageBytes);
             return false;
         }
         LOG_DEBUG("左图像缓冲区创建成功: {} 字节", m_leftImageBuffer->getSize());
         
-        // 右图像缓冲区（原始尺寸）
+        // 右图像缓冲区（压缩后尺寸 - 320×480）
         m_rightImageBuffer = std::make_unique<BufferManager>(m_context);
-        if (!m_rightImageBuffer->createStorageBuffer(originalImageBytes)) {
-            LOG_ERROR("创建右图像缓冲区失败 ({} 字节)", originalImageBytes);
+        if (!m_rightImageBuffer->createStorageBuffer(compressedImageBytes)) {
+            LOG_ERROR("创建右图像缓冲区失败 ({} 字节)", compressedImageBytes);
             return false;
         }
         LOG_DEBUG("右图像缓冲区创建成功: {} 字节", m_rightImageBuffer->getSize());
         
-        // 拼接图像缓冲区（压缩后左右拼接）
+        // 拼接图像缓冲区（压缩后左右拼接 - 640×480）
         m_stitchedImageBuffer = std::make_unique<BufferManager>(m_context);
         if (!m_stitchedImageBuffer->createStorageBuffer(stitchedImageBytes)) {
             LOG_ERROR("创建拼接图像缓冲区失败 ({} 字节)", stitchedImageBytes);
@@ -458,7 +489,7 @@ bool StereoPipeline::createBuffers() {
         
         LOG_INFO("✅ 立体匹配流水线缓冲区创建完成 (共11个缓冲区)");
         LOG_INFO("  总内存使用: {:.2f} MB", 
-                 (originalImageBytes*2 + stitchedImageBytes + censusBufferBytes*2 + debugBufferBytes + 
+                 (compressedImageBytes*2 + stitchedImageBytes + censusBufferBytes*2 + debugBufferBytes + 
                   costVolumeBytes + disparityBytes + tempBufferBytes*2 + 
                   paramsSize) / (1024.0 * 1024.0));
         return true;
@@ -915,57 +946,44 @@ std::vector<uint8_t> StereoPipeline::compressImage(const uint8_t* src,
 }
 
 bool StereoPipeline::compressAndStitchImages() {
-    // 从左右图像缓冲区获取原始数据
-    size_t originalImageSize = static_cast<size_t>(m_originalImageWidth) * 
-                              static_cast<size_t>(m_originalImageHeight);
+    // 从左右图像缓冲区获取数据 - 现在应该是压缩后尺寸（320×480）
+    size_t compressedImageSize = static_cast<size_t>(m_compressedImageWidth) * 
+                                static_cast<size_t>(m_compressedImageHeight);
     
-    LOG_DEBUG("压缩拼接参数:");
-    LOG_DEBUG("  原始尺寸: {}x{} = {} 像素", 
-              m_originalImageWidth, m_originalImageHeight, originalImageSize);
-    LOG_DEBUG("  压缩后尺寸: {}x{} = {} 像素",
-              m_compressedImageWidth, m_compressedImageHeight,
-              m_compressedImageWidth * m_compressedImageHeight);
+    LOG_DEBUG("图像拼接参数:");
+    LOG_DEBUG("  单眼尺寸: {}x{} = {} 像素",
+              m_compressedImageWidth, m_compressedImageHeight, compressedImageSize);
     
-    std::vector<uint8_t> leftImage(originalImageSize);
-    std::vector<uint8_t> rightImage(originalImageSize);
+    std::vector<uint8_t> leftImage(compressedImageSize);
+    std::vector<uint8_t> rightImage(compressedImageSize);
     
     LOG_DEBUG("从缓冲区读取左图像数据...");
-    if (!m_leftImageBuffer->copyFromBuffer(leftImage.data(), originalImageSize)) {
+    if (!m_leftImageBuffer->copyFromBuffer(leftImage.data(), compressedImageSize)) {
         LOG_ERROR("获取左图像数据失败");
         return false;
     }
     
     LOG_DEBUG("从缓冲区读取右图像数据...");
-    if (!m_rightImageBuffer->copyFromBuffer(rightImage.data(), originalImageSize)) {
+    if (!m_rightImageBuffer->copyFromBuffer(rightImage.data(), compressedImageSize)) {
         LOG_ERROR("获取右图像数据失败");
         return false;
     }
     
-    // 压缩左右图像
-    LOG_DEBUG("压缩左图像...");
-    auto compressedLeft = compressImage(leftImage.data(), 
-                                       m_originalImageWidth, m_originalImageHeight,
-                                       m_compressedImageWidth, m_compressedImageHeight);
+    // 拼接图像：左半部分 = 左眼，右半部分 = 右眼
+    // 拼接图像大小 = 2 × 压缩后图像大小（640×480）
+    std::vector<uint8_t> stitchedImage(compressedImageSize * 2);
     
-    LOG_DEBUG("压缩右图像...");
-    auto compressedRight = compressImage(rightImage.data(), 
-                                        m_originalImageWidth, m_originalImageHeight,
-                                        m_compressedImageWidth, m_compressedImageHeight);
-    
-    // 拼接图像：左半部分 = 压缩后的左眼，右半部分 = 压缩后的右眼
-    size_t compressedSize = compressedLeft.size(); // compressedWidth * compressedHeight
-    std::vector<uint8_t> stitchedImage(compressedSize * 2);
-    
-    LOG_DEBUG("拼接图像，压缩大小: {} 字节", compressedSize);
+    LOG_DEBUG("拼接图像，每个图像大小: {} 字节", compressedImageSize);
     
     // 复制左眼数据到拼接图像左半部分
-    std::copy(compressedLeft.begin(), compressedLeft.end(), stitchedImage.begin());
+    std::copy(leftImage.begin(), leftImage.end(), stitchedImage.begin());
     
     // 复制右眼数据到拼接图像右半部分
-    std::copy(compressedRight.begin(), compressedRight.end(), 
-              stitchedImage.begin() + compressedSize);
+    std::copy(rightImage.begin(), rightImage.end(), 
+              stitchedImage.begin() + compressedImageSize);
     
-    LOG_DEBUG("拼接图像总大小: {} 字节", stitchedImage.size());
+    LOG_DEBUG("拼接图像总大小: {} 字节 ({}x{})", 
+              stitchedImage.size(), m_compressedImageWidth * 2, m_compressedImageHeight);
     
     // 将拼接图像复制到缓冲区
     if (!m_stitchedImageBuffer->copyToBuffer(stitchedImage.data(), stitchedImage.size())) {
@@ -973,8 +991,8 @@ bool StereoPipeline::compressAndStitchImages() {
         return false;
     }
     
-    LOG_INFO("✅ 图像压缩拼接完成: {}x{} -> {}x{} (拼接后: {}x{})", 
-              m_originalImageWidth, m_originalImageHeight,
+    LOG_INFO("✅ 图像拼接完成: 左{}x{} + 右{}x{} = 拼接后{}x{}", 
+              m_compressedImageWidth, m_compressedImageHeight,
               m_compressedImageWidth, m_compressedImageHeight,
               m_compressedImageWidth * 2, m_compressedImageHeight);
     

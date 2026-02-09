@@ -4,6 +4,7 @@
 #include <sstream>
 #include <type_traits>
 #include <filesystem>
+#include <algorithm>
 
 namespace stereo_depth {
 namespace utils {
@@ -125,7 +126,14 @@ void Config::setFromYaml(const std::string& key, const YAML::Node& node) {
         // 尝试解析为不同类型
         try {
             int int_val = node.as<int>();
+            // 对于非负整数，同时存储为int和unsigned int
             config_map_[key] = Value(int_val);
+            // 对于正数，也存储一个unsigned int版本
+            if (int_val >= 0) {
+                std::string uint_key = key + ".uint";
+                unsigned int uint_val = static_cast<unsigned int>(int_val);
+                config_map_[uint_key] = Value(uint_val);
+            }
             return;
         } catch (...) {}
         
@@ -156,6 +164,95 @@ void Config::setFromYaml(const std::string& key, const YAML::Node& node) {
     }
 }
 
+// 类型转换辅助函数
+template<typename T>
+T Config::convertValue(const Value& var) {
+    // 使用访问者模式处理类型转换
+    struct ValueVisitor {
+        T operator()(int val) const {
+            if constexpr (std::is_same_v<T, std::string>) {
+                return std::to_string(val);
+            } else if constexpr (std::is_same_v<T, unsigned int>) {
+                if (val >= 0) {
+                    return static_cast<unsigned int>(val);
+                } else {
+                    throw std::bad_variant_access();
+                }
+            } else {
+                return static_cast<T>(val);
+            }
+        }
+        
+        T operator()(unsigned int val) const {
+            if constexpr (std::is_same_v<T, std::string>) {
+                return std::to_string(val);
+            } else if constexpr (std::is_same_v<T, int>) {
+                if (val <= static_cast<unsigned int>(std::numeric_limits<int>::max())) {
+                    return static_cast<int>(val);
+                } else {
+                    throw std::bad_variant_access();
+                }
+            } else {
+                return static_cast<T>(val);
+            }
+        }
+        
+        T operator()(float val) const {
+            if constexpr (std::is_same_v<T, std::string>) {
+                return std::to_string(val);
+            } else {
+                return static_cast<T>(val);
+            }
+        }
+        
+        T operator()(double val) const {
+            if constexpr (std::is_same_v<T, std::string>) {
+                return std::to_string(val);
+            } else {
+                return static_cast<T>(val);
+            }
+        }
+        
+        T operator()(bool val) const {
+            if constexpr (std::is_same_v<T, std::string>) {
+                return val ? "true" : "false";
+            } else {
+                return static_cast<T>(val);
+            }
+        }
+        
+        T operator()(const std::string& val) const {
+            if constexpr (std::is_same_v<T, std::string>) {
+                return val;
+            } else if constexpr (std::is_same_v<T, bool>) {
+                // 尝试解析字符串为布尔值
+                std::string lower_val = val;
+                std::transform(lower_val.begin(), lower_val.end(), lower_val.begin(), ::tolower);
+                if (lower_val == "true" || lower_val == "yes" || lower_val == "1") {
+                    return true;
+                } else if (lower_val == "false" || lower_val == "no" || lower_val == "0") {
+                    return false;
+                } else {
+                    throw std::bad_variant_access();
+                }
+            } else if constexpr (std::is_integral_v<T> || std::is_floating_point_v<T>) {
+                // 尝试解析字符串为数值
+                std::stringstream ss(val);
+                T result;
+                ss >> result;
+                if (ss.fail()) {
+                    throw std::bad_variant_access();
+                }
+                return result;
+            } else {
+                throw std::bad_variant_access();
+            }
+        }
+    };
+    
+    return std::visit(ValueVisitor{}, var);
+}
+
 // 模板方法实现
 template<typename T>
 T Config::get(const std::string& key, const T& default_value) const {
@@ -176,29 +273,22 @@ T Config::get(const std::string& key, const T& default_value) const {
 template<typename T>
 void Config::set(const std::string& key, const T& value) {
     config_map_[key] = Value(value);
-    
-    // 同时更新YAML节点
-    // 简化实现：暂时只更新内存映射
 }
 
 // 显式实例化常用类型
 template int Config::get<int>(const std::string&, const int&) const;
+template unsigned int Config::get<unsigned int>(const std::string&, const unsigned int&) const;
 template float Config::get<float>(const std::string&, const float&) const;
 template double Config::get<double>(const std::string&, const double&) const;
 template bool Config::get<bool>(const std::string&, const bool&) const;
 template std::string Config::get<std::string>(const std::string&, const std::string&) const;
 
 template void Config::set<int>(const std::string&, const int&);
+template void Config::set<unsigned int>(const std::string&, const unsigned int&);
 template void Config::set<float>(const std::string&, const float&);
 template void Config::set<double>(const std::string&, const double&);
 template void Config::set<bool>(const std::string&, const bool&);
 template void Config::set<std::string>(const std::string&, const std::string&);
-
-// 类型转换辅助函数
-template<typename T>
-T Config::convertValue(const Value& var) {
-    return std::get<T>(var);
-}
 
 // ConfigManager实现
 ConfigManager& ConfigManager::getInstance() {

@@ -11,9 +11,12 @@
 #include <opencv2/opencv.hpp>
 #include <fstream>
 #include <sys/stat.h>
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 /**
- * @brief 检查文件是否存在（跨平台兼容版本）
+ * @brief 检查文件是否存在
  * @param filename 文件名
  * @return 文件是否存在
  */
@@ -23,544 +26,560 @@ bool fileExists(const std::string& filename) {
 }
 
 /**
+ * @brief 确保目录存在，如果不存在则创建
+ * @param dir 目录路径
+ * @return 是否成功
+ */
+bool ensureDirectoryExists(const std::string& dir) {
+    try {
+        if (!fs::exists(dir)) {
+            if (!fs::create_directories(dir)) {
+                LOG_ERROR("无法创建目录: {}", dir);
+                return false;
+            }
+            LOG_INFO("创建目录: {}", dir);
+        }
+        return true;
+    } catch (const std::exception& e) {
+        LOG_ERROR("创建目录时发生异常: {}", e.what());
+        return false;
+    }
+}
+
+/**
+ * @brief 加载拼接图像并分割为左右眼图像
+ * @param imagePath 拼接图像路径
+ * @param leftImage 输出左眼图像
+ * @param rightImage 输出右眼图像
+ * @param config 配置对象
+ * @return 是否成功
+ */
+bool loadAndSplitStereoImage(const std::string& imagePath, 
+                           cv::Mat& leftImage, cv::Mat& rightImage,
+                           const stereo_depth::utils::Config& config) {
+    try {
+        // 从配置读取图像尺寸
+        uint32_t originalWidth = config.get<uint32_t>("camera.width");
+        uint32_t originalHeight = config.get<uint32_t>("camera.height");
+        uint32_t compressedWidth = config.get<uint32_t>("stereo.image_width");
+        uint32_t compressedHeight = config.get<uint32_t>("stereo.image_height");
+        
+        LOG_INFO("加载拼接图像: {}", imagePath);
+        LOG_INFO("原始图像尺寸: {}x{}", originalWidth, originalHeight);
+        LOG_INFO("压缩后尺寸: {}x{}", compressedWidth, compressedHeight);
+        
+        // 验证压缩比例
+        if (originalWidth % 2 != 0) {
+            LOG_ERROR("原始图像宽度必须是偶数，当前宽度: {}", originalWidth);
+            return false;
+        }
+        
+        if (originalWidth / 2 != compressedWidth) {
+            LOG_ERROR("压缩宽度不匹配: 原始宽度/2 = {}, 配置宽度 = {}", 
+                     originalWidth / 2, compressedWidth);
+            return false;
+        }
+        
+        // 加载拼接图像
+        cv::Mat stitchedImage = cv::imread(imagePath, cv::IMREAD_GRAYSCALE);
+        if (stitchedImage.empty()) {
+            LOG_ERROR("无法加载图像: {}", imagePath);
+            return false;
+        }
+        
+        // 验证图像尺寸
+        if (static_cast<uint32_t>(stitchedImage.cols) != originalWidth || 
+            static_cast<uint32_t>(stitchedImage.rows) != originalHeight) {
+            LOG_ERROR("图像尺寸不匹配: 期望 {}x{}, 实际 {}x{}", 
+                     originalWidth, originalHeight, 
+                     stitchedImage.cols, stitchedImage.rows);
+            return false;
+        }
+        
+        LOG_INFO("✅ 图像加载成功: {}x{}", stitchedImage.cols, stitchedImage.rows);
+        
+        // 分割图像（左半部分：左眼，右半部分：右眼）
+        cv::Rect leftRect(0, 0, compressedWidth, compressedHeight);
+        cv::Rect rightRect(compressedWidth, 0, compressedWidth, compressedHeight);
+        
+        leftImage = stitchedImage(leftRect).clone();
+        rightImage = stitchedImage(rightRect).clone();
+        
+        LOG_INFO("✅ 图像分割完成:");
+        LOG_INFO("  左眼图像: {}x{}", leftImage.cols, leftImage.rows);
+        LOG_INFO("  右眼图像: {}x{}", rightImage.cols, rightImage.rows);
+        
+        return true;
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("加载和分割图像时发生异常: {}", e.what());
+        return false;
+    }
+}
+
+/**
+ * @brief 保存视差图
+ * @param disparityData 视差数据
+ * @param width 图像宽度
+ * @param height 图像高度
+ * @param outputPath 输出路径
+ * @param config 配置对象
+ * @return 是否成功
+ */
+bool saveDisparityMap(const uint16_t* disparityData, 
+                     uint32_t width, uint32_t height,
+                     const std::string& outputPath,
+                     const stereo_depth::utils::Config& config) {
+    try {
+        // 创建输出目录
+        if (!ensureDirectoryExists(fs::path(outputPath).parent_path().string())) {
+            return false;
+        }
+        
+        // 将16位视差图转换为8位用于显示
+        cv::Mat disparity16(height, width, CV_16UC1, (void*)disparityData);
+        cv::Mat disparity8;
+        
+        // 从配置获取最大视差用于归一化
+        uint32_t maxDisparity = config.get<uint32_t>("stereo.max_disparity");
+        
+        // 计算实际的最大视差值
+        double minVal, maxVal;
+        cv::minMaxLoc(disparity16, &minVal, &maxVal);
+        
+        LOG_INFO("视差图统计: 最小值={}, 最大值={}, 配置最大视差={}", 
+                 minVal, maxVal, maxDisparity);
+        
+        // 使用配置的最大视差进行归一化，以便可视化
+        if (maxVal > 0) {
+            double scale = 255.0 / std::min(static_cast<double>(maxDisparity), maxVal);
+            disparity16.convertTo(disparity8, CV_8UC1, scale);
+        } else {
+            // 如果全是0，创建一个空图像
+            disparity8 = cv::Mat(height, width, CV_8UC1, cv::Scalar(0));
+        }
+        
+        // 应用颜色映射以增强可视化
+        cv::Mat colorDisparity;
+        cv::applyColorMap(disparity8, colorDisparity, cv::COLORMAP_JET);
+        
+        // 保存图像
+        std::string outputFormat = config.get<std::string>("output.output_format");
+        std::string fullPath = outputPath + "." + outputFormat;
+        
+        if (cv::imwrite(fullPath, colorDisparity)) {
+            LOG_INFO("✅ 视差图保存成功: {}", fullPath);
+            
+            // 同时保存原始16位视差图用于后续处理
+            std::string rawPath = outputPath + "_raw.bin";
+            std::ofstream rawFile(rawPath, std::ios::binary);
+            if (rawFile) {
+                rawFile.write(reinterpret_cast<const char*>(disparityData), 
+                              width * height * sizeof(uint16_t));
+                rawFile.close();
+                LOG_INFO("✅ 原始视差数据保存成功: {}", rawPath);
+            }
+            return true;
+        } else {
+            LOG_ERROR("保存视差图失败: {}", fullPath);
+            return false;
+        }
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("保存视差图时发生异常: {}", e.what());
+        return false;
+    }
+}
+
+/**
+ * @brief 查找测试图像文件
+ * @param testImageDir 测试图像目录
+ * @return 找到的图像文件路径
+ */
+std::vector<std::string> findTestImages(const std::string& testImageDir) {
+    std::vector<std::string> imagePaths;
+    
+    try {
+        if (!fs::exists(testImageDir)) {
+            LOG_ERROR("测试图像目录不存在: {}", testImageDir);
+            return imagePaths;
+        }
+        
+        LOG_INFO("扫描目录: {}", testImageDir);
+        
+        for (const auto& entry : fs::directory_iterator(testImageDir)) {
+            if (entry.is_regular_file()) {
+                std::string ext = entry.path().extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                
+                if (ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp") {
+                    imagePaths.push_back(entry.path().string());
+                }
+            }
+        }
+        
+        std::sort(imagePaths.begin(), imagePaths.end());
+        
+        LOG_INFO("找到 {} 个图像文件", imagePaths.size());
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("查找测试图像时发生异常: {}", e.what());
+    }
+    
+    return imagePaths;
+}
+
+/**
+ * @brief 验证配置参数
+ * @param config 配置对象
+ * @return 是否验证成功
+ */
+bool validateConfig(const stereo_depth::utils::Config& config) {
+    try {
+        LOG_INFO("验证配置参数...");
+        
+        // 验证必要的配置项
+        std::vector<std::string> requiredKeys = {
+            "camera.width",
+            "camera.height", 
+            "stereo.image_width",
+            "stereo.image_height",
+            "stereo.max_disparity",
+            "output.test_image_dir",
+            "output.output_dir",
+            "output.output_format"
+        };
+        
+        for (const auto& key : requiredKeys) {
+            if (!config.has(key)) {
+                LOG_ERROR("缺少必需的配置项: {}", key);
+                return false;
+            }
+        }
+        
+        // 验证图像尺寸
+        uint32_t cameraWidth = config.get<uint32_t>("camera.width");
+        uint32_t cameraHeight = config.get<uint32_t>("camera.height");
+        uint32_t stereoWidth = config.get<uint32_t>("stereo.image_width");
+        uint32_t stereoHeight = config.get<uint32_t>("stereo.image_height");
+        uint32_t maxDisparity = config.get<uint32_t>("stereo.max_disparity");
+        
+        LOG_INFO("配置参数:");
+        LOG_INFO("  相机尺寸: {}x{}", cameraWidth, cameraHeight);
+        LOG_INFO("  立体图像尺寸: {}x{}", stereoWidth, stereoHeight);
+        LOG_INFO("  最大视差: {}", maxDisparity);
+        
+        // 验证压缩比例
+        if (cameraWidth % 2 != 0) {
+            LOG_ERROR("相机宽度必须是偶数: {}", cameraWidth);
+            return false;
+        }
+        
+        if (cameraWidth / 2 != stereoWidth) {
+            LOG_ERROR("立体图像宽度必须等于相机宽度的一半: {} != {}/2", 
+                     stereoWidth, cameraWidth);
+            return false;
+        }
+        
+        if (cameraHeight != stereoHeight) {
+            LOG_ERROR("立体图像高度必须等于相机高度: {} != {}", 
+                     stereoHeight, cameraHeight);
+            return false;
+        }
+        
+        if (maxDisparity == 0) {
+            LOG_ERROR("最大视差不能为0");
+            return false;
+        }
+        
+        LOG_INFO("✅ 配置验证成功");
+        return true;
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("配置验证异常: {}", e.what());
+        return false;
+    }
+}
+
+/**
  * @brief 测试程序主函数
  * 
- * 测试Vulkan框架的所有组件：
- * 1. Vulkan上下文
- * 2. 缓冲区管理器
- * 3. 计算管线
- * 4. 立体匹配流水线
+ * 测试Vulkan框架和立体匹配流水线：
+ * 1. 加载配置参数
+ * 2. 从images/test读取测试图像
+ * 3. 使用立体匹配流水线计算视差图
+ * 4. 将结果保存到images/output
  * 
- * 更新日期：2026年2月7日（修复着色器Uniform缓冲区不匹配问题）
+ * 更新日期：2026年2月9日（完全使用配置文件参数）
  */
 int main(int argc, char* argv[]) {
     using namespace stereo_depth;
     
+    // 记录总开始时间
+    auto totalStartTime = std::chrono::high_resolution_clock::now();
+    
     // 初始化日志系统
     utils::Logger::initialize("test", spdlog::level::info);
     
-    LOG_INFO("=== OrangePiZero3 立体深度 GPU 框架测试 ===");
+    LOG_INFO("=== OrangePiZero3 立体深度 GPU 系统测试 ===");
+    LOG_INFO("开始时间: 2026年2月9日");
+    LOG_INFO("----------------------------------------");
+    
+    // 加载配置文件
+    LOG_INFO("\n[1/6] 加载配置参数");
+    LOG_INFO("------------------------");
+    
+    utils::Config config;
+    std::string configPath = "config/global_config.yaml";
+    
+    if (!config.loadFromFile(configPath)) {
+        LOG_ERROR("无法加载配置文件: {}", configPath);
+        LOG_ERROR("请确保配置文件存在并格式正确");
+        return EXIT_FAILURE;
+    }
+    
+    LOG_INFO("✅ 配置加载成功: {}", configPath);
+    
+    // 设置日志级别
+    int debugLevel = config.get<int>("system.debug_level", 2);
+    spdlog::level::level_enum logLevel = static_cast<spdlog::level::level_enum>(
+        std::min(std::max(debugLevel, 0), 5));
+    utils::Logger::setLevel(logLevel);
+    LOG_INFO("日志级别设置为: {}", spdlog::level::to_string_view(logLevel));
+    
+    // 验证配置参数
+    if (!validateConfig(config)) {
+        LOG_ERROR("配置验证失败");
+        return EXIT_FAILURE;
+    }
+    
+    // 从配置读取路径
+    std::string testImageDir = config.get<std::string>("output.test_image_dir");
+    std::string outputDir = config.get<std::string>("output.output_dir");
+    
+    LOG_INFO("测试图像目录: {}", testImageDir);
+    LOG_INFO("输出目录: {}", outputDir);
     
     // 设置Mali-G31所需的环境变量（必须在Vulkan初始化之前）
     setenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
+    LOG_INFO("设置环境变量: PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1");
+    
+    // 查找测试图像
+    LOG_INFO("\n[2/6] 查找测试图像");
+    LOG_INFO("------------------------");
+    
+    std::vector<std::string> testImages = findTestImages(testImageDir);
+    if (testImages.empty()) {
+        LOG_ERROR("未找到测试图像，请将图像放入 {} 目录", testImageDir);
+        LOG_ERROR("图像格式应为: {}x{} JPG，左半部分{}x{}为左眼，右半部分为右眼",
+                 config.get<uint32_t>("camera.width"),
+                 config.get<uint32_t>("camera.height"),
+                 config.get<uint32_t>("stereo.image_width"),
+                 config.get<uint32_t>("stereo.image_height"));
+        return EXIT_FAILURE;
+    }
+    
+    LOG_INFO("找到 {} 个测试图像:", testImages.size());
+    for (size_t i = 0; i < std::min(testImages.size(), size_t(5)); ++i) {
+        LOG_INFO("  {}. {}", i + 1, fs::path(testImages[i]).filename().string());
+    }
+    if (testImages.size() > 5) {
+        LOG_INFO("  ... 和其他 {} 个图像", testImages.size() - 5);
+    }
     
     try {
-        // 诊断测试: 检查Vulkan环境
-        LOG_INFO("\n[诊断] 检查Vulkan环境");
+        // 创建Vulkan上下文
+        LOG_INFO("\n[3/6] 初始化Vulkan系统");
         LOG_INFO("------------------------");
         
-        // 1. 检查环境变量
-        const char* panvkEnv = getenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER");
-        LOG_INFO("环境变量 PAN_I_WANT_A_BROKEN_VULKAN_DRIVER = {}", 
-                 panvkEnv ? panvkEnv : "未设置");
+        auto vulkanStartTime = std::chrono::high_resolution_clock::now();
         
-        // 2. 创建Vulkan上下文
-        LOG_INFO("\n创建Vulkan上下文...");
         vulkan::VulkanContext vulkanContext;
-        
-        // 测试1: Vulkan上下文初始化
-        LOG_INFO("\n[测试1] Vulkan上下文初始化");
-        LOG_INFO("----------------------------------------");
-        
         if (!vulkanContext.initialize(false)) {
             LOG_ERROR("初始化Vulkan上下文失败");
             return EXIT_FAILURE;
         }
         
-        LOG_INFO("✅ Vulkan上下文初始化成功");
+        auto vulkanEndTime = std::chrono::high_resolution_clock::now();
+        auto vulkanDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            vulkanEndTime - vulkanStartTime);
+        
+        LOG_INFO("✅ Vulkan系统初始化完成");
         LOG_INFO("  设备: {}", vulkanContext.getDeviceName());
         LOG_INFO("  Vulkan版本: {}", vulkanContext.getVulkanVersion());
-        LOG_INFO("  计算队列索引: {}", vulkanContext.getComputeQueueFamilyIndex());
+        LOG_INFO("  初始化耗时: {} 毫秒", vulkanDuration.count());
         
-        // 3. 检查物理设备信息
-        VkPhysicalDevice physicalDevice = vulkanContext.getPhysicalDevice();
-        if (physicalDevice == VK_NULL_HANDLE) {
-            LOG_ERROR("物理设备无效");
+        // 从配置读取立体匹配参数
+        uint32_t imageWidth = config.get<uint32_t>("camera.width");
+        uint32_t imageHeight = config.get<uint32_t>("camera.height");
+        uint32_t maxDisparity = config.get<uint32_t>("stereo.max_disparity");
+        
+        // 创建立体匹配流水线
+        LOG_INFO("\n[4/6] 创建立体匹配流水线");
+        LOG_INFO("------------------------");
+        
+        LOG_INFO("流水线参数:");
+        LOG_INFO("  输入图像尺寸: {}x{}", imageWidth, imageHeight);
+        LOG_INFO("  最大视差: {}", maxDisparity);
+        LOG_INFO("  算法: {}", config.get<std::string>("stereo.algorithm", "wta"));
+        LOG_INFO("  Census窗口: {}x{}", 
+                 config.get<uint32_t>("stereo.window_size", 9),
+                 config.get<uint32_t>("stereo.window_size", 9));
+        LOG_INFO("  唯一性比率: {}%", config.get<uint32_t>("stereo.uniqueness_ratio", 15));
+        
+        auto pipelineStartTime = std::chrono::high_resolution_clock::now();
+        
+        vulkan::StereoPipeline stereoPipeline(vulkanContext);
+        if (!stereoPipeline.initialize(imageWidth, imageHeight, maxDisparity)) {
+            LOG_ERROR("立体匹配流水线初始化失败");
+            LOG_ERROR("请确保着色器已编译: cd build && cmake --build . --target shaders");
             return EXIT_FAILURE;
         }
         
-        VkPhysicalDeviceProperties deviceProps;
-        vkGetPhysicalDeviceProperties(physicalDevice, &deviceProps);
+        auto pipelineEndTime = std::chrono::high_resolution_clock::now();
+        auto pipelineDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            pipelineEndTime - pipelineStartTime);
         
-        LOG_INFO("物理设备信息:");
-        LOG_INFO("  设备名称: {}", deviceProps.deviceName);
-        LOG_INFO("  设备类型: {}", 
-                 deviceProps.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "集成GPU" :
-                 deviceProps.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "独立GPU" :
-                 deviceProps.deviceType == VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU ? "虚拟GPU" :
-                 deviceProps.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? "CPU" : "其他");
-        LOG_INFO("  Vulkan API版本: {}.{}.{}", 
-                 VK_VERSION_MAJOR(deviceProps.apiVersion),
-                 VK_VERSION_MINOR(deviceProps.apiVersion),
-                 VK_VERSION_PATCH(deviceProps.apiVersion));
+        LOG_INFO("✅ 立体匹配流水线初始化完成");
+        LOG_INFO("  初始化耗时: {} 毫秒", pipelineDuration.count());
         
-        // 测试2: 缓冲区管理器
-        LOG_INFO("\n[测试2] 缓冲区管理器");
+        // 处理每个测试图像
+        LOG_INFO("\n[5/6] 处理测试图像");
         LOG_INFO("------------------------");
         
-        {
-            vulkan::BufferManager bufferManager(vulkanContext);
-            
-            // 测试存储缓冲区
-            if (!bufferManager.createStorageBuffer(1024 * 1024)) { // 1MB
-                LOG_ERROR("创建存储缓冲区失败");
-                return EXIT_FAILURE;
-            }
-            
-            LOG_INFO("✅ 存储缓冲区创建成功: {} 字节", bufferManager.getSize());
-            
-            // 测试数据复制
-            std::vector<uint32_t> testData(256);
-            for (size_t i = 0; i < testData.size(); ++i) {
-                testData[i] = static_cast<uint32_t>(i);
-            }
-            
-            if (!bufferManager.copyToBuffer(testData.data(), testData.size() * sizeof(uint32_t))) {
-                LOG_ERROR("复制数据到缓冲区失败");
-                return EXIT_FAILURE;
-            }
-            
-            LOG_INFO("✅ 数据复制到缓冲区成功");
-            
-            // 测试数据读取
-            std::vector<uint32_t> readData(testData.size());
-            if (!bufferManager.copyFromBuffer(readData.data(), readData.size() * sizeof(uint32_t))) {
-                LOG_ERROR("从缓冲区复制数据失败");
-                return EXIT_FAILURE;
-            }
-            
-            bool dataMatches = true;
-            for (size_t i = 0; i < testData.size(); ++i) {
-                if (testData[i] != readData[i]) {
-                    dataMatches = false;
-                    break;
-                }
-            }
-            
-            if (dataMatches) {
-                LOG_INFO("✅ 数据完整性验证通过 ({} 个元素)", testData.size());
-            } else {
-                LOG_ERROR("检测到数据损坏");
-                return EXIT_FAILURE;
-            }
-            
-            // 缓冲区会在作用域结束时自动清理
-            LOG_INFO("✅ 缓冲区管理器RAII测试通过");
-        }
+        int processedCount = 0;
+        int successCount = 0;
         
-        // 测试3: 描述符集布局构建器
-        LOG_INFO("\n[测试3] 描述符集布局构建器");
-        LOG_INFO("---------------------------------------");
-        
-        {
-            vulkan::DescriptorSetLayoutBuilder layoutBuilder(vulkanContext);
+        for (size_t imgIdx = 0; imgIdx < testImages.size(); ++imgIdx) {
+            const auto& imagePath = testImages[imgIdx];
+            std::string imageName = fs::path(imagePath).stem().string();
             
-            // 添加存储缓冲区和Uniform缓冲区绑定
-            layoutBuilder.addStorageBuffer(0, 1, VK_SHADER_STAGE_COMPUTE_BIT)
-                         .addStorageBuffer(1, 1, VK_SHADER_STAGE_COMPUTE_BIT)
-                         .addUniformBuffer(2, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+            LOG_INFO("\n处理图像 {}/{}: {}", 
+                     imgIdx + 1, testImages.size(), fs::path(imagePath).filename().string());
             
-            VkDescriptorSetLayout layout = layoutBuilder.build();
-            if (layout == VK_NULL_HANDLE) {
-                LOG_ERROR("创建描述符集布局失败");
-                return EXIT_FAILURE;
+            // 加载并分割图像
+            cv::Mat leftImage, rightImage;
+            if (!loadAndSplitStereoImage(imagePath, leftImage, rightImage, config)) {
+                LOG_ERROR("❌ 图像加载失败: {}", imagePath);
+                continue;
             }
             
-            LOG_INFO("✅ 描述符集布局创建成功，包含3个绑定");
+            processedCount++;
             
-            // 清理
-            vkDestroyDescriptorSetLayout(vulkanContext.getDevice(), layout, nullptr);
-            LOG_INFO("✅ 布局清理成功");
-        }
-        
-        // 测试4: 直接使用Vulkan API创建计算管线（类似独立测试）
-        LOG_INFO("\n[测试4] 直接使用Vulkan API创建计算管线");
-        LOG_INFO("-----------------------------------------");
-        
-        {
-            LOG_INFO("步骤1: 查找着色器文件 test.comp.spv");
+            // 设置图像数据到流水线
+            auto setImageStartTime = std::chrono::high_resolution_clock::now();
             
-            // 查找着色器文件（类似独立测试的做法）
-            std::vector<std::string> searchPaths = {
-                "src/vulkan/spv/test.comp.spv",
-                "../src/vulkan/spv/test.comp.spv",
-                "../../src/vulkan/spv/test.comp.spv",
-                "../../../src/vulkan/spv/test.comp.spv",
-                "shaders/test.comp.spv"
-            };
-            
-            std::string shaderPath;
-            bool foundShader = false;
-            
-            for (const auto& path : searchPaths) {
-                if (fileExists(path)) {
-                    shaderPath = path;
-                    foundShader = true;
-                    LOG_INFO("找到着色器文件: {}", path);
-                    break;
-                }
+            if (!stereoPipeline.setLeftImage(leftImage.data)) {
+                LOG_ERROR("❌ 设置左图像数据失败");
+                continue;
             }
             
-            if (!foundShader) {
-                LOG_ERROR("❌ 未找到着色器文件 test.comp.spv");
-                LOG_ERROR("请先编译着色器: cd build && cmake .. && make");
-                return EXIT_FAILURE;
+            if (!stereoPipeline.setRightImage(rightImage.data)) {
+                LOG_ERROR("❌ 设置右图像数据失败");
+                continue;
             }
             
-            LOG_INFO("步骤2: 加载着色器文件");
+            auto setImageEndTime = std::chrono::high_resolution_clock::now();
+            auto setImageDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                setImageEndTime - setImageStartTime);
             
-            // 加载SPIR-V文件
-            std::ifstream file(shaderPath, std::ios::ate | std::ios::binary);
-            if (!file.is_open()) {
-                LOG_ERROR("无法打开着色器文件: {}", shaderPath);
-                return EXIT_FAILURE;
+            LOG_INFO("✅ 图像数据设置完成，耗时: {} 毫秒", setImageDuration.count());
+            
+            // 执行立体匹配计算
+            LOG_INFO("开始立体匹配计算...");
+            auto computeStartTime = std::chrono::high_resolution_clock::now();
+            
+            if (!stereoPipeline.compute()) {
+                LOG_ERROR("❌ 立体匹配计算失败");
+                continue;
             }
             
-            size_t fileSize = static_cast<size_t>(file.tellg());
-            std::vector<uint32_t> shaderCode(fileSize / sizeof(uint32_t));
+            auto computeEndTime = std::chrono::high_resolution_clock::now();
+            auto computeDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                computeEndTime - computeStartTime);
             
-            file.seekg(0);
-            file.read(reinterpret_cast<char*>(shaderCode.data()), fileSize);
-            file.close();
-            
-            LOG_INFO("✅ 着色器加载成功: {} 字节", fileSize);
-            
-            LOG_INFO("步骤3: 创建着色器模块");
-            
-            VkDevice device = vulkanContext.getDevice();
-            if (device == VK_NULL_HANDLE) {
-                LOG_ERROR("设备句柄无效");
-                return EXIT_FAILURE;
+            LOG_INFO("✅ 立体匹配计算完成");
+            LOG_INFO("  计算耗时: {} 毫秒", computeDuration.count());
+            if (computeDuration.count() > 0) {
+                LOG_INFO("  估计帧率: {:.1f} FPS", 1000.0 / computeDuration.count());
             }
             
-            // 创建着色器模块
-            VkShaderModuleCreateInfo shaderInfo = {};
-            shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-            shaderInfo.codeSize = shaderCode.size() * sizeof(uint32_t);
-            shaderInfo.pCode = shaderCode.data();
+            // 获取视差图
+            uint32_t compressedWidth = config.get<uint32_t>("stereo.image_width");
+            uint32_t compressedHeight = config.get<uint32_t>("stereo.image_height");
+            size_t disparitySize = static_cast<size_t>(compressedWidth) * 
+                                  static_cast<size_t>(compressedHeight);
             
-            VkShaderModule shaderModule;
-            VkResult result = vkCreateShaderModule(device, &shaderInfo, nullptr, &shaderModule);
-            
-            if (result != VK_SUCCESS) {
-                LOG_ERROR("创建着色器模块失败: {}", result);
-                return EXIT_FAILURE;
+            std::vector<uint16_t> disparityMap(disparitySize);
+            if (!stereoPipeline.getDisparityMap(disparityMap.data())) {
+                LOG_ERROR("❌ 获取视差图失败");
+                continue;
             }
             
-            LOG_INFO("✅ 着色器模块创建成功");
+            LOG_INFO("✅ 视差图获取成功: {} 像素", disparitySize);
             
-            LOG_INFO("步骤4: 创建描述符集布局");
-            
-            // 创建描述符集布局（与test.comp中的绑定匹配）
-            std::vector<VkDescriptorSetLayoutBinding> bindings = {
-                // Uniform缓冲区 (binding 0)
-                {
-                    .binding = 0,
-                    .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                    .pImmutableSamplers = nullptr
-                },
-                // 输入缓冲区 (binding 1)
-                {
-                    .binding = 1,
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                    .pImmutableSamplers = nullptr
-                },
-                // 输出缓冲区 (binding 2)
-                {
-                    .binding = 2,
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                    .pImmutableSamplers = nullptr
-                },
-                // 调试缓冲区 (binding 3)
-                {
-                    .binding = 3,
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                    .pImmutableSamplers = nullptr
-                }
-            };
-            
-            VkDescriptorSetLayoutCreateInfo layoutInfo = {};
-            layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-            layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
-            layoutInfo.pBindings = bindings.data();
-            
-            VkDescriptorSetLayout descriptorSetLayout;
-            result = vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout);
-            
-            if (result != VK_SUCCESS) {
-                LOG_ERROR("创建描述符集布局失败: {}", result);
-                vkDestroyShaderModule(device, shaderModule, nullptr);
-                return EXIT_FAILURE;
+            // 保存视差图
+            std::string outputPath = outputDir + "/" + imageName + "_disparity";
+            if (!saveDisparityMap(disparityMap.data(), compressedWidth, compressedHeight, 
+                                 outputPath, config)) {
+                LOG_ERROR("❌ 保存视差图失败");
+                continue;
             }
             
-            LOG_INFO("✅ 描述符集布局创建成功 (4个绑定)");
+            successCount++;
             
-            LOG_INFO("步骤5: 创建管线布局");
-            
-            VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
-            pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-            pipelineLayoutInfo.setLayoutCount = 1;
-            pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
-            pipelineLayoutInfo.pushConstantRangeCount = 0;
-            pipelineLayoutInfo.pPushConstantRanges = nullptr;
-            
-            VkPipelineLayout pipelineLayout;
-            result = vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout);
-            
-            if (result != VK_SUCCESS) {
-                LOG_ERROR("创建管线布局失败: {}", result);
-                vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
-                vkDestroyShaderModule(device, shaderModule, nullptr);
-                return EXIT_FAILURE;
-            }
-            
-            LOG_INFO("✅ 管线布局创建成功");
-            
-            LOG_INFO("步骤6: 创建计算管线");
-            
-            // 创建着色器阶段信息
-            VkPipelineShaderStageCreateInfo stageInfo = {};
-            stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-            stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-            stageInfo.module = shaderModule;
-            stageInfo.pName = "main";
-            stageInfo.pSpecializationInfo = nullptr;
-            
-            // 创建计算管线
-            VkComputePipelineCreateInfo pipelineInfo = {};
-            pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-            pipelineInfo.stage = stageInfo;
-            pipelineInfo.layout = pipelineLayout;
-            pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
-            pipelineInfo.basePipelineIndex = -1;
-            
-            VkPipeline computePipeline;
-            LOG_INFO("正在创建计算管线...");
-            
-            result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline);
-            
-            if (result != VK_SUCCESS) {
-                LOG_ERROR("创建计算管线失败: {}", result);
-                
-                // 提供详细的错误信息
-                switch (result) {
-                    case VK_ERROR_OUT_OF_HOST_MEMORY:
-                        LOG_ERROR("  VK_ERROR_OUT_OF_HOST_MEMORY: 主机内存不足");
-                        break;
-                    case VK_ERROR_OUT_OF_DEVICE_MEMORY:
-                        LOG_ERROR("  VK_ERROR_OUT_OF_DEVICE_MEMORY: 设备内存不足");
-                        break;
-                    case VK_ERROR_INITIALIZATION_FAILED:
-                        LOG_ERROR("  VK_ERROR_INITIALIZATION_FAILED: 初始化失败");
-                        break;
-                    case VK_ERROR_DEVICE_LOST:
-                        LOG_ERROR("  VK_ERROR_DEVICE_LOST: 设备丢失");
-                        break;
-                    case VK_ERROR_INCOMPATIBLE_DRIVER:
-                        LOG_ERROR("  VK_ERROR_INCOMPATIBLE_DRIVER: 不兼容的驱动程序");
-                        LOG_ERROR("  可能原因:");
-                        LOG_ERROR("    1. 着色器Uniform缓冲区布局与C++端不匹配");
-                        LOG_ERROR("    2. 着色器使用了驱动不支持的指令");
-                        LOG_ERROR("    3. 着色器编译选项有问题");
-                        break;
-                    case VK_ERROR_FEATURE_NOT_PRESENT:
-                        LOG_ERROR("  VK_ERROR_FEATURE_NOT_PRESENT: 不支持的特性");
-                        break;
-                    default:
-                        LOG_ERROR("  未知错误代码: {}", result);
-                        break;
-                }
-                
-                vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-                vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
-                vkDestroyShaderModule(device, shaderModule, nullptr);
-                return EXIT_FAILURE;
-            }
-            
-            LOG_INFO("✅ 计算管线创建成功！");
-            LOG_INFO("  ✓ 项目着色器 test.comp.spv 编译成功");
-            LOG_INFO("  ✓ Uniform缓冲区布局匹配成功");
-            LOG_INFO("  ✓ PanVK驱动可以正确处理我们的着色器");
-            
-            // 清理资源
-            LOG_INFO("步骤7: 清理资源");
-            vkDestroyPipeline(device, computePipeline, nullptr);
-            LOG_INFO("  ✓ 管线已销毁");
-            
-            vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-            LOG_INFO("  ✓ 管线布局已销毁");
-            
-            vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
-            LOG_INFO("  ✓ 描述符集布局已销毁");
-            
-            vkDestroyShaderModule(device, shaderModule, nullptr);
-            LOG_INFO("  ✓ 着色器模块已销毁");
-            
-            LOG_INFO("✅ 直接API测试完成");
-        }
-        
-        // 测试5: 立体匹配流水线框架测试
-        LOG_INFO("\n[测试5] 立体匹配流水线框架");
-        LOG_INFO("-----------------------------------");
-        
-        {
-            // 创建立体匹配流水线
-            vulkan::StereoPipeline stereoPipeline(vulkanContext);
-            
-            // 使用测试图像尺寸（320x480，来自拼接图像的一半）
-            uint32_t testWidth = 320;
-            uint32_t testHeight = 480;
-            uint32_t maxDisparity = 64;
-            
-            LOG_INFO("尝试初始化立体匹配流水线...");
-            LOG_INFO("图像尺寸: {} x {}", testWidth, testHeight);
-            LOG_INFO("最大视差: {}", maxDisparity);
-            
-            // 先尝试初始化
-            if (!stereoPipeline.initialize(testWidth, testHeight, maxDisparity)) {
-                LOG_ERROR("❌ 立体匹配流水线初始化失败");
-                LOG_ERROR("原因: 缺少必需的着色器文件");
-                LOG_ERROR("解决方案:");
-                LOG_ERROR("  1. 检查 src/vulkan/spv/ 目录下是否有以下文件:");
-                LOG_ERROR("     • census.comp.spv");
-                LOG_ERROR("     • cost.comp.spv");
-                LOG_ERROR("     • aggregation.comp.spv");
-                LOG_ERROR("     • wta.comp.spv");
-                LOG_ERROR("     • postprocess.comp.spv");
-                LOG_ERROR("  2. 如果没有，请运行以下命令编译着色器:");
-                LOG_ERROR("     cd build && cmake .. && make shaders");
-                
-                // 注意：我们不返回EXIT_FAILURE，因为这只是测试5失败
-                // 但我们可以继续执行后续的测试
-                LOG_WARN("⚠ 跳过立体匹配流水线测试，继续执行后续测试...");
-            } else {
-                LOG_INFO("✅ 立体匹配流水线初始化成功");
-                
-                // 生成测试图像数据（简单的梯度图像）
-                std::vector<uint8_t> leftImage(testWidth * testHeight);
-                std::vector<uint8_t> rightImage(testWidth * testHeight);
-                
-                for (uint32_t y = 0; y < testHeight; ++y) {
-                    for (uint32_t x = 0; x < testWidth; ++x) {
-                        uint32_t index = y * testWidth + x;
-                        
-                        // 左图像：水平梯度
-                        leftImage[index] = static_cast<uint8_t>(x % 256);
-                        
-                        // 右图像：左图像偏移，模拟视差
-                        uint32_t shiftedX = (x + 5) % testWidth; // 5像素视差
-                        rightImage[index] = static_cast<uint8_t>(shiftedX % 256);
-                    }
-                }
-                
-                // 设置图像数据
-                if (!stereoPipeline.setLeftImage(leftImage.data())) {
-                    LOG_ERROR("设置左图像数据失败");
-                    return EXIT_FAILURE;
-                }
-                
-                if (!stereoPipeline.setRightImage(rightImage.data())) {
-                    LOG_ERROR("设置右图像数据失败");
-                    return EXIT_FAILURE;
-                }
-                
-                LOG_INFO("✅ 测试图像设置成功（梯度图像，模拟5像素视差）");
-                
-                // 执行计算（框架测试，即使没有真实着色器，也应该能够完成命令记录）
-                LOG_INFO("开始框架计算测试...");
-                
-                auto startTime = std::chrono::high_resolution_clock::now();
-                
-                // 注意：由于我们没有实际的计算着色器，这个调用可能会失败
-                // 但我们主要测试框架的完整性
-                try {
-                    bool computeSuccess = stereoPipeline.compute();
-                    
-                    auto endTime = std::chrono::high_resolution_clock::now();
-                    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
-                    
-                    if (computeSuccess) {
-                        LOG_INFO("✅ 计算完成，耗时 {} 毫秒", duration.count());
-                        
-                        // 尝试获取结果（即使可能为空）
-                        std::vector<uint16_t> disparityMap(testWidth * testHeight);
-                        if (stereoPipeline.getDisparityMap(disparityMap.data())) {
-                            LOG_INFO("✅ 视差图获取成功 ({} 字节)", 
-                                     disparityMap.size() * sizeof(uint16_t));
-                        }
-                    } else {
-                        LOG_WARN("⚠ 计算失败（在没有实际着色器的情况下是预期的）");
-                        LOG_WARN("框架结构测试完成成功");
-                    }
-                    
-                } catch (const std::exception& e) {
-                    LOG_WARN("⚠ 计算过程中发生异常（预期的）: {}", e.what());
-                    LOG_WARN("框架测试完成 - 需要着色器编译以实现完整功能");
-                }
-                
-                LOG_INFO("✅ 立体匹配流水线框架测试完成");
+            // 输出性能摘要
+            LOG_INFO("📊 性能摘要:");
+            LOG_INFO("  图像加载: {} 毫秒", setImageDuration.count());
+            LOG_INFO("  立体匹配: {} 毫秒", computeDuration.count());
+            LOG_INFO("  总处理时间: {} 毫秒", setImageDuration.count() + computeDuration.count());
+            if ((setImageDuration.count() + computeDuration.count()) > 0) {
+                LOG_INFO("  处理速度: {:.1f} FPS", 
+                         1000.0 / (setImageDuration.count() + computeDuration.count()));
             }
         }
         
-        // 测试6: 性能基准测试
-        LOG_INFO("\n[测试6] 性能基准测试");
-        LOG_INFO("------------------------------");
-        
-        {
-            // 创建多个缓冲区测试内存管理性能
-            const size_t bufferCount = 10;
-            const size_t bufferSize = 1024 * 1024; // 1MB each
-            
-            auto startTime = std::chrono::high_resolution_clock::now();
-            
-            std::vector<vulkan::BufferManager> buffers;
-            buffers.reserve(bufferCount);
-            
-            for (size_t i = 0; i < bufferCount; ++i) {
-                buffers.emplace_back(vulkanContext);
-                if (!buffers.back().createStorageBuffer(bufferSize)) {
-                    LOG_ERROR("创建缓冲区 {} 失败", i);
-                    break;
-                }
-            }
-            
-            auto endTime = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
-            
-            LOG_INFO("创建了 {} 个缓冲区 ({} MB 总大小) 耗时 {} 毫秒", 
-                     buffers.size(), 
-                     (buffers.size() * bufferSize) / (1024 * 1024),
-                     duration.count());
-            
-            if (buffers.size() == bufferCount) {
-                LOG_INFO("✅ 缓冲区创建性能: {:.2f} MB/s", 
-                         (bufferCount * bufferSize) / (duration.count() * 1024.0 * 1024.0 / 1000.0));
-            }
-            
-            // 缓冲区会在作用域结束时自动清理
-            LOG_INFO("✅ 内存管理RAII测试通过");
-        }
+        // 系统清理
+        LOG_INFO("\n[6/6] 系统清理");
+        LOG_INFO("------------------------");
         
         // 等待设备空闲
         vulkanContext.waitIdle();
         
-        LOG_INFO("\n=== 所有测试完成成功 ===");
-        LOG_INFO("Vulkan GPU框架已准备好进行立体深度计算");
-        LOG_INFO("下一步:");
-        LOG_INFO("  1. SPIR-V着色器编译已验证 ✅");
-        LOG_INFO("  2. 配置参数传递已验证 ✅");
-        LOG_INFO("  3. 框架结构已验证 ✅");
-        LOG_INFO("  4. 下一步: 编写实际的立体匹配着色器");
-        LOG_INFO("  5. 下一步: 集成OpenCV进行图像I/O");
-        LOG_INFO("  6. 下一步: 实现相机标定集成");
+        // 记录总结束时间
+        auto totalEndTime = std::chrono::high_resolution_clock::now();
+        auto totalDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            totalEndTime - totalStartTime);
+        
+        // 输出测试摘要
+        LOG_INFO("\n=== 测试完成 ===");
+        LOG_INFO("📊 测试摘要:");
+        LOG_INFO("  总测试时间: {} 毫秒 ({:.1f} 秒)", 
+                 totalDuration.count(), totalDuration.count() / 1000.0);
+        LOG_INFO("  找到图像: {}", testImages.size());
+        LOG_INFO("  处理图像: {}", processedCount);
+        LOG_INFO("  成功处理: {}", successCount);
+        LOG_INFO("  失败处理: {}", processedCount - successCount);
+        
+        if (processedCount > 0) {
+            double successRate = (static_cast<double>(successCount) / processedCount) * 100.0;
+            LOG_INFO("  成功率: {:.1f}%", successRate);
+        }
+        
+        if (successCount > 0) {
+            LOG_INFO("✅ 立体匹配流水线测试成功");
+            LOG_INFO("  输出目录: {}", outputDir);
+            LOG_INFO("  请检查 {} 目录中的结果图像", outputDir);
+        } else {
+            LOG_ERROR("❌ 立体匹配流水线测试失败，没有成功处理的图像");
+            return EXIT_FAILURE;
+        }
+        
+        LOG_INFO("\n🎯 下一步:");
+        LOG_INFO("  1. 检查输出图像质量");
+        LOG_INFO("  2. 调整算法参数以获得更好效果");
+        LOG_INFO("  3. 集成相机标定参数");
+        LOG_INFO("  4. 进行实时视频流测试");
         
         return EXIT_SUCCESS;
         
