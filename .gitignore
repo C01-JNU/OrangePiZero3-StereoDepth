@@ -35,9 +35,10 @@ images/**/*.ico
 images/**/*.bin
 
 # 标定结果
-calibration_results/*.yml
-calibration_results/*.yaml
-calibration_results/*.xml
+#calibration_results/*.yml
+#calibration_results/*.yaml
+#calibration_results/*.xml
+#我认为这个可以不忽略，先注释掉
 
 # 着色器编译缓存
 shaders/compiled/*
