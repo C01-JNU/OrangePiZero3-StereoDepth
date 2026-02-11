@@ -7,6 +7,10 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <random>
+#include <set>
+#include <chrono>
+#include <numeric>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -52,6 +56,104 @@ std::string matrixToYaml(const cv::Mat& mat, const std::string& name) {
     return ss.str();
 }
 
+// 计算组合数 C(n, k) - 辅助函数
+static long long calculateCombination(int n, int k) {
+    if (k > n) return 0;
+    if (k * 2 > n) k = n - k;
+    if (k == 0) return 1;
+    
+    long long result = n;
+    for (int i = 2; i <= k; ++i) {
+        result *= (n - i + 1);
+        result /= i;
+    }
+    return result;
+}
+
+// 加权随机选择 - 辅助函数
+static std::vector<int> weightedRandomSelection(int n, int k, 
+                                                const std::vector<int>& usageCount,
+                                                std::mt19937& rng,
+                                                std::set<std::vector<int>>& triedCombinations) {
+    std::vector<int> combination;
+    
+    // 如果k接近n，使用所有图像
+    if (k >= n - 2) {
+        for (int i = 0; i < n; i++) {
+            combination.push_back(i);
+        }
+        return combination;
+    }
+    
+    // 尝试生成新组合的最大次数
+    int maxAttempts = 1000;
+    for (int attempt = 0; attempt < maxAttempts; attempt++) {
+        combination.clear();
+        
+        // 计算权重：使用次数越少，权重越高
+        std::vector<double> weights(n);
+        double totalWeight = 0.0;
+        
+        for (int i = 0; i < n; i++) {
+            // 使用次数为0时权重为1，否则为 1/(1+usageCount)
+            weights[i] = 1.0 / (1.0 + usageCount[i]);
+            totalWeight += weights[i];
+        }
+        
+        // 准备候选索引
+        std::vector<int> candidates(n);
+        std::iota(candidates.begin(), candidates.end(), 0);
+        
+        // 使用加权随机选择k个图像
+        for (int i = 0; i < k; i++) {
+            // 生成0到totalWeight之间的随机数
+            std::uniform_real_distribution<double> dist(0.0, totalWeight);
+            double randomValue = dist(rng);
+            
+            // 根据权重选择
+            double cumulative = 0.0;
+            for (int j = 0; j < (int)candidates.size(); j++) {
+                cumulative += weights[candidates[j]];
+                if (cumulative >= randomValue) {
+                    // 选中的图像
+                    combination.push_back(candidates[j]);
+                    
+                    // 从候选列表中移除已选中的图像
+                    totalWeight -= weights[candidates[j]];
+                    // 注意：这里应该更新weights和candidates向量
+                    // 但为了简化，我们使用更直接的方法
+                    weights.erase(weights.begin() + j);
+                    candidates.erase(candidates.begin() + j);
+                    break;
+                }
+            }
+        }
+        
+        std::sort(combination.begin(), combination.end());
+        
+        // 检查是否已经尝试过
+        if (triedCombinations.find(combination) == triedCombinations.end()) {
+            triedCombinations.insert(combination);
+            return combination;
+        }
+    }
+    
+    // 无法生成新组合，返回空
+    return {};
+}
+
+// 格式化向量为字符串 - 辅助函数
+static std::string formatVector(const std::vector<int>& vec) {
+    std::stringstream ss;
+    for (size_t i = 0; i < vec.size(); i++) {
+        ss << vec[i] + 1; // 转换为1-based索引
+        if (i < vec.size() - 1) {
+            ss << ", ";
+        }
+    }
+    return ss.str();
+}
+
 bool StereoCalibrator::calibrate() {
     LOG_INFO("开始立体相机标定");
     
@@ -72,8 +174,8 @@ bool StereoCalibrator::calibrate() {
     auto imagePairs = findCalibrationImagePairs();
     LOG_INFO("找到 {} 对标定图像", imagePairs.size());
     
-    if (imagePairs.size() < 10) {
-        LOG_ERROR("标定图像不足，至少需要10对，当前只有 {} 对", imagePairs.size());
+    if (imagePairs.size() < 5) {
+        LOG_ERROR("标定图像不足，至少需要5对，当前只有 {} 对", imagePairs.size());
         return false;
     }
     
@@ -145,38 +247,43 @@ bool StereoCalibrator::calibrate() {
     
     LOG_INFO("角点检测完成，有效图像对: {}/{}", validPairs, totalPairs);
     
-    if (validPairs < 10) {
-        LOG_ERROR("有效图像对不足，至少需要10对，当前只有 {} 对", validPairs);
+    if (validPairs < 5) {
+        LOG_ERROR("有效图像对不足，至少需要5对，当前只有 {} 对", validPairs);
         return false;
     }
     
-    // 5. 多分组大小优化标定
-    LOG_INFO("开始多分组大小优化标定...");
+    // 5. 单分组大小优化标定（使用0.2比例）
+    LOG_INFO("开始单分组大小优化标定...");
     
     // 准备物体点
     std::vector<std::vector<cv::Point3f>> allObjectPoints(validPairs, objectPattern);
-    
-    // 定义不同的分组大小（基于总图像数量的比例）
-    std::vector<int> groupSizes;
     int validImageCount = validPairs;
     
-    // 计算不同的分组大小
-    std::vector<double> ratios = {1.0/3, 1.0/4, 1.0/5, 1.0/6, 1.0/7, 1.0/8};
-    for (double ratio : ratios) {
-        int groupSize = static_cast<int>(std::round(validImageCount * ratio));
-        if (groupSize >= 10 && groupSize <= validImageCount) {  // 每组至少10张，不超过总数
-            groupSizes.push_back(groupSize);
+    // 计算分组大小：使用0.2比例（1/5）
+    int groupSize = 0;
+    
+    // 特殊情况处理
+    if (validImageCount < 7) {
+        // 小于7张时，使用全部图像
+        groupSize = validImageCount;
+        LOG_INFO("有效图像较少（{}对），直接使用全部图像进行标定", validImageCount);
+    } else {
+        // 使用0.2比例
+        groupSize = static_cast<int>(std::round(validImageCount * 0.2));
+        
+        // 确保分组大小在合理范围内
+        if (groupSize < 5) {
+            LOG_INFO("计算的分组大小 {} 小于最小值5，使用最小值5", groupSize);
+            groupSize = 5;
+        }
+        if (groupSize > validImageCount) {
+            LOG_INFO("计算的分组大小 {} 超过总图像数，使用全部图像", validImageCount);
+            groupSize = validImageCount;
         }
     }
     
-    // 去重并排序
-    std::sort(groupSizes.begin(), groupSizes.end());
-    groupSizes.erase(std::unique(groupSizes.begin(), groupSizes.end()), groupSizes.end());
-    
-    LOG_INFO("将尝试以下分组大小: ");
-    for (int size : groupSizes) {
-        LOG_INFO("  {}", size);
-    }
+    LOG_INFO("使用分组大小: {} (总图像数的 {:.1f}%)", 
+            groupSize, (groupSize * 100.0 / validImageCount));
     
     // 存储最佳结果
     double bestRms = 1e10;
@@ -187,37 +294,97 @@ bool StereoCalibrator::calibrate() {
     int bestGroupIndex = -1;
     std::vector<int> bestGroupIndices;
     
-    // 对每个分组大小进行标定
-    for (int groupSize : groupSizes) {
-        LOG_INFO("=== 尝试分组大小: {} ===", groupSize);
+    // 特殊情况：如果分组大小等于总图像数，直接使用所有图像
+    if (groupSize == validImageCount) {
+        LOG_INFO("使用全部 {} 对图像进行标定", validImageCount);
         
-        int groupCount = (validImageCount + groupSize - 1) / groupSize; // 向上取整
-        LOG_INFO("将分为 {} 组", groupCount);
+        // 提取所有图像数据
+        std::vector<std::vector<cv::Point3f>> groupObjectPoints = allObjectPoints;
+        std::vector<std::vector<cv::Point2f>> groupImagePointsLeft = allImagePointsLeft;
+        std::vector<std::vector<cv::Point2f>> groupImagePointsRight = allImagePointsRight;
+        
+        // 执行标定
+        cv::Mat cameraMatrixLeft, distCoeffsLeft;
+        cv::Mat cameraMatrixRight, distCoeffsRight;
+        cv::Mat R, T, E, F;
+        double rms = 0.0;
+        
+        bool success = performGroupCalibration(groupObjectPoints, groupImagePointsLeft,
+                                             groupImagePointsRight, cameraMatrixLeft, distCoeffsLeft,
+                                             cameraMatrixRight, distCoeffsRight, R, T, E, F, rms);
+        
+        if (success) {
+            bestRms = rms;
+            bestCameraMatrixLeft = cameraMatrixLeft.clone();
+            bestDistCoeffsLeft = distCoeffsLeft.clone();
+            bestCameraMatrixRight = cameraMatrixRight.clone();
+            bestDistCoeffsRight = distCoeffsRight.clone();
+            bestR = R.clone();
+            bestT = T.clone();
+            bestE = E.clone();
+            bestF = F.clone();
+            bestGroupSize = groupSize;
+            bestGroupIndex = 1;
+            bestGroupIndices = validImageIndices;
+            
+            LOG_INFO("标定成功! RMS = {:.6f}", rms);
+        } else {
+            LOG_ERROR("使用全部图像标定失败");
+            return false;
+        }
+    } else {
+        LOG_WARN("注意：加权随机分组标定将尝试多种组合，可能需要较长时间！");
+        
+        // 计算组合数
+        long long totalCombinations = calculateCombination(validImageCount, groupSize);
+        LOG_INFO("理论组合数: C({},{}) = {}", validImageCount, groupSize, 
+                (totalCombinations > 10000) ? ">10000" : std::to_string(totalCombinations));
+        
+        // 限制实际尝试的组合数
+        int maxTrials = std::min(50, (int)std::min(totalCombinations, 100LL));
+        int actualTrials = std::min(maxTrials, validImageCount * 2);
+        
+        LOG_INFO("实际尝试组合数: {} (受限于时间)", actualTrials);
+        
+        // 设置随机数生成器
+        unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+        std::mt19937 rng(seed);
+        
+        // 存储已经尝试过的组合，避免重复
+        std::set<std::vector<int>> triedCombinations;
+        
+        // 记录每张图像的使用次数（用于加权随机）
+        std::vector<int> imageUsageCount(validImageCount, 0);
         
         // 对每组进行标定
-        for (int group = 0; group < groupCount; group++) {
-            int startIdx = group * groupSize;
-            int endIdx = std::min((group + 1) * groupSize, validImageCount);
-            int groupImageCount = endIdx - startIdx;
+        for (int trial = 0; trial < actualTrials; trial++) {
+            // 使用加权随机选择生成组合
+            std::vector<int> combination = weightedRandomSelection(
+                validImageCount, groupSize, imageUsageCount, rng, triedCombinations);
             
-            // 跳过图像数太少的组
-            if (groupImageCount < 10) {
-                LOG_INFO("跳过第 {} 组 (只有 {} 张图像)", group + 1, groupImageCount);
-                continue;
+            // 如果无法生成新组合，提前结束
+            if (combination.empty()) {
+                LOG_INFO("无法生成新的组合，提前结束（已尝试 {} 组）", trial);
+                break;
             }
             
-            LOG_INFO("=== 标定第 {} 组 ===", group + 1);
-            LOG_INFO("图像范围: {} - {} ({} 张)", startIdx + 1, endIdx, groupImageCount);
+            LOG_INFO("=== 标定第 {} 组 (分组大小 {}) ===", trial + 1, groupSize);
+            LOG_INFO("使用图像索引: [{}]", formatVector(combination));
+            
+            // 更新图像使用次数
+            for (int idx : combination) {
+                imageUsageCount[idx]++;
+            }
             
             // 提取当前组的标定数据
             std::vector<std::vector<cv::Point3f>> groupObjectPoints;
             std::vector<std::vector<cv::Point2f>> groupImagePointsLeft;
             std::vector<std::vector<cv::Point2f>> groupImagePointsRight;
             
-            for (int i = startIdx; i < endIdx; i++) {
-                groupObjectPoints.push_back(allObjectPoints[i]);
-                groupImagePointsLeft.push_back(allImagePointsLeft[i]);
-                groupImagePointsRight.push_back(allImagePointsRight[i]);
+            for (int idx : combination) {
+                groupObjectPoints.push_back(allObjectPoints[idx]);
+                groupImagePointsLeft.push_back(allImagePointsLeft[idx]);
+                groupImagePointsRight.push_back(allImagePointsRight[idx]);
             }
             
             // 执行标定
@@ -230,27 +397,68 @@ bool StereoCalibrator::calibrate() {
                                                  groupImagePointsRight, cameraMatrixLeft, distCoeffsLeft,
                                                  cameraMatrixRight, distCoeffsRight, R, T, E, F, rms);
             
-            if (success && rms < bestRms) {
-                bestRms = rms;
-                bestCameraMatrixLeft = cameraMatrixLeft.clone();
-                bestDistCoeffsLeft = distCoeffsLeft.clone();
-                bestCameraMatrixRight = cameraMatrixRight.clone();
-                bestDistCoeffsRight = distCoeffsRight.clone();
-                bestR = R.clone();
-                bestT = T.clone();
-                bestE = E.clone();
-                bestF = F.clone();
-                bestGroupSize = groupSize;
-                bestGroupIndex = group + 1;
-                
-                // 保存最佳组的图像索引
-                bestGroupIndices.clear();
-                for (int i = startIdx; i < endIdx; i++) {
-                    bestGroupIndices.push_back(validImageIndices[i]);
+            if (success) {
+                if (rms < bestRms) {
+                    bestRms = rms;
+                    bestCameraMatrixLeft = cameraMatrixLeft.clone();
+                    bestDistCoeffsLeft = distCoeffsLeft.clone();
+                    bestCameraMatrixRight = cameraMatrixRight.clone();
+                    bestDistCoeffsRight = distCoeffsRight.clone();
+                    bestR = R.clone();
+                    bestT = T.clone();
+                    bestE = E.clone();
+                    bestF = F.clone();
+                    bestGroupSize = groupSize;
+                    bestGroupIndex = trial + 1;
+                    
+                    // 保存最佳组的图像索引（使用原始图像索引）
+                    bestGroupIndices.clear();
+                    for (int idx : combination) {
+                        bestGroupIndices.push_back(validImageIndices[idx]);
+                    }
+                    
+                    LOG_INFO("  -> 更新最佳结果! RMS = {:.6f}", rms);
                 }
                 
-                LOG_INFO("  -> 更新最佳结果! RMS = {}", rms);
-                LOG_INFO("     分组大小: {}, 组号: {}", bestGroupSize, bestGroupIndex);
+                // 输出进度
+                if ((trial + 1) % 10 == 0 || trial + 1 == actualTrials) {
+                    LOG_INFO("进度: {}/{} 组，当前最佳RMS: {:.6f}", 
+                            trial + 1, actualTrials, bestRms);
+                    
+                    // 输出使用次数统计
+                    int minUsage = *std::min_element(imageUsageCount.begin(), imageUsageCount.end());
+                    int maxUsage = *std::max_element(imageUsageCount.begin(), imageUsageCount.end());
+                    double avgUsage = std::accumulate(imageUsageCount.begin(), imageUsageCount.end(), 0.0) / validImageCount;
+                    
+                    LOG_DEBUG("图像使用统计 - 最小: {}, 最大: {}, 平均: {:.2f}", 
+                             minUsage, maxUsage, avgUsage);
+                }
+            } else {
+                LOG_WARN("标定失败，组合: {}", formatVector(combination));
+            }
+            
+            // 每5组休息一下，避免过热
+            if ((trial + 1) % 5 == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+        
+        // 输出最终使用统计
+        LOG_INFO("=== 图像使用统计 ===");
+        int minUsage = *std::min_element(imageUsageCount.begin(), imageUsageCount.end());
+        int maxUsage = *std::max_element(imageUsageCount.begin(), imageUsageCount.end());
+        double avgUsage = std::accumulate(imageUsageCount.begin(), imageUsageCount.end(), 0.0) / validImageCount;
+        
+        LOG_INFO("总尝试组数: {}", std::min(actualTrials, (int)triedCombinations.size()));
+        LOG_INFO("最小使用次数: {}", minUsage);
+        LOG_INFO("最大使用次数: {}", maxUsage);
+        LOG_INFO("平均使用次数: {:.2f}", avgUsage);
+        
+        // 输出使用分布（每10张图像显示一次）
+        LOG_INFO("使用次数分布:");
+        for (int i = 0; i < validImageCount; i++) {
+            if ((i + 1) % 10 == 0 || i == validImageCount - 1) {
+                LOG_INFO("图像 {:3d}: {} 次", i + 1, imageUsageCount[i]);
             }
         }
     }
@@ -261,7 +469,7 @@ bool StereoCalibrator::calibrate() {
     }
     
     LOG_INFO("=== 最佳结果 ===");
-    LOG_INFO("最佳RMS误差: {}", bestRms);
+    LOG_INFO("最佳RMS误差: {:.6f}", bestRms);
     LOG_INFO("来自分组大小: {}, 组号: {}", bestGroupSize, bestGroupIndex);
     LOG_INFO("使用图像范围: {} - {}", bestGroupIndices.front() + 1, bestGroupIndices.back() + 1);
     LOG_INFO("使用图像数量: {}", bestGroupIndices.size());
@@ -326,7 +534,7 @@ bool StereoCalibrator::calibrate() {
     }
     
     LOG_INFO("立体标定完成!");
-    LOG_INFO("  RMS误差: {}", m_rmsError);
+    LOG_INFO("  RMS误差: {:.6f}", m_rmsError);
     LOG_INFO("  使用图像: {} 对", m_imagesUsed);
     LOG_INFO("  基线长度: {:.4f} 米", cv::norm(m_translationVector));
     LOG_INFO("  分组大小: {}, 组号: {}", bestGroupSize, bestGroupIndex);
@@ -345,6 +553,11 @@ bool StereoCalibrator::performGroupCalibration(
     double& rms) {
     
     try {
+        if (groupObjectPoints.size() < 5) {
+            LOG_WARN("  - 跳过，图像数量不足: {} (需要至少5张)", groupObjectPoints.size());
+            return false;
+        }
+        
         // 初始化相机矩阵和畸变系数 - 使用完整5个系数
         cameraMatrixLeft = cv::Mat::eye(3, 3, CV_64F);
         cameraMatrixRight = cv::Mat::eye(3, 3, CV_64F);
@@ -360,7 +573,7 @@ bool StereoCalibrator::performGroupCalibration(
         double rmsRight = cv::calibrateCamera(groupObjectPoints, groupImagePointsRight, m_imageSize, 
                                             cameraMatrixRight, distCoeffsRight, rvecsRight, tvecsRight);
         
-        LOG_DEBUG("  - 单目标定RMS: 左={}, 右={}", rmsLeft, rmsRight);
+        LOG_DEBUG("  - 单目标定RMS: 左={:.6f}, 右={:.6f}", rmsLeft, rmsRight);
         
         // 双目标定 - 使用完整参数，自动优化
         int stereoFlags = cv::CALIB_USE_INTRINSIC_GUESS;  // 使用初始猜测，但不固定任何参数
@@ -372,7 +585,7 @@ bool StereoCalibrator::performGroupCalibration(
                                  stereoFlags,
                                  cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 200, 1e-6));
         
-        LOG_DEBUG("  - 双目标定RMS: {}", rms);
+        LOG_DEBUG("  - 双目标定RMS: {:.6f}", rms);
         
         return true;
     } catch (const std::exception& e) {
@@ -681,6 +894,13 @@ bool StereoCalibrator::saveCalibrationResults(int bestGroupSize, int bestGroupIn
         // 写入误差和附加信息
         fs << "rms_error" << m_rmsError;
         fs << "baseline_meters" << cv::norm(m_translationVector);
+        
+        // 写入使用的图像索引
+        fs << "used_image_indices" << "[";
+        for (int idx : bestGroupIndices) {
+            fs << idx + 1; // 保存为1-based索引
+        }
+        fs << "]";
         
         fs.release();
         

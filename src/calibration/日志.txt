@@ -1,0 +1,5 @@
+这里的东西废弃了，需要的可以用它
+我的摄像头标定不出来，我不管了
+
+特别注意：
+当前的stereo_rectifier.cpp和calibration_loader.cpp处理的不是很好，最好自行优化一下

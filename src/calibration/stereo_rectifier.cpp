@@ -2,16 +2,35 @@
 #include "utils/logger.hpp"
 #include <sys/stat.h>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/calib3d.hpp>
 #include <chrono>
+#include <errno.h>
 
 namespace stereo_depth {
 namespace calibration {
 
-StereoRectifier::StereoRectifier(const std::string& calibration_file) {
+// ==================== 构造函数/析构函数 ====================
+
+StereoRectifier::StereoRectifier() 
+    : m_initialized(false)
+    , m_maps_computed(false)
+    , m_mode(RectificationMode::SCALE_TO_FIT) {
+}
+
+StereoRectifier::StereoRectifier(const std::string& calibration_file, 
+                               RectificationMode mode)
+    : m_initialized(false)
+    , m_maps_computed(false)
+    , m_mode(mode) {
     loadAndInitialize(calibration_file);
 }
 
-bool StereoRectifier::initialize(const CalibrationParams& params) {
+StereoRectifier::~StereoRectifier() = default;
+
+// ==================== 公共初始化接口 ====================
+
+bool StereoRectifier::initialize(const CalibrationParams& params, 
+                                RectificationMode mode) {
     if (!params.isValid()) {
         LOG_ERROR("无效的标定参数，无法初始化校正器");
         return false;
@@ -19,47 +38,59 @@ bool StereoRectifier::initialize(const CalibrationParams& params) {
     
     m_params = params;
     m_image_size = params.image_size;
+    m_mode = mode;
+    m_output_size = m_image_size;
     
-    LOG_INFO("初始化立体校正处理器");
-    LOG_INFO("  图像尺寸: {}x{}", m_image_size.width, m_image_size.height);
+    LOG_INFO("初始化立体校正处理器 (模式: {})", 
+             modeToString(m_mode));
+    LOG_INFO("  输入尺寸: {}x{}", m_image_size.width, m_image_size.height);
     LOG_INFO("  基线长度: {:.2f} mm", m_params.baseline_meters * 1000.0);
     
-    // 计算校正映射表
+    computeValidROI();
+    
+    if (m_mode == RectificationMode::SCALE_TO_FIT) {
+        computeScalingParameters();
+    }
+    
     if (!computeRectificationMaps()) {
         LOG_ERROR("计算校正映射表失败");
         return false;
     }
     
-    // 计算有效区域
-    computeValidROI();
-    
     m_initialized = true;
     LOG_INFO("立体校正处理器初始化完成");
-    
     return true;
 }
 
 bool StereoRectifier::loadAndInitialize(const std::string& calibration_file) {
+    return loadAndInitialize(calibration_file, m_mode);
+}
+
+bool StereoRectifier::loadAndInitialize(const std::string& calibration_file, 
+                                       RectificationMode mode) {
     CalibrationParams params;
-    if (!m_loader.loadFromFile(calibration_file, params)) {
+    CalibrationLoader loader;
+    
+    if (!loader.loadFromFile(calibration_file, params)) {
         LOG_ERROR("加载标定文件失败: {}", calibration_file);
         return false;
     }
     
-    return initialize(params);
+    return initialize(params, mode);
 }
+
+// ==================== 校正主接口 ====================
 
 bool StereoRectifier::rectifyPair(const cv::Mat& left_image, 
                                  const cv::Mat& right_image,
                                  cv::Mat& left_rectified,
                                  cv::Mat& right_rectified,
-                                 bool crop_to_valid_roi) {
-    if (!m_initialized) {
-        LOG_ERROR("校正器未初始化");
+                                 RectificationMode mode) {
+    if (!m_initialized || !m_maps_computed) {
+        LOG_ERROR("校正器未初始化或映射表未计算");
         return false;
     }
     
-    // 检查输入图像尺寸
     if (left_image.size() != m_image_size || right_image.size() != m_image_size) {
         LOG_ERROR("输入图像尺寸不匹配: 期望 {}x{}, 实际左={}x{}, 右={}x{}",
                  m_image_size.width, m_image_size.height,
@@ -68,7 +99,6 @@ bool StereoRectifier::rectifyPair(const cv::Mat& left_image,
         return false;
     }
     
-    // 检查图像类型（应该是单通道灰度图）
     if (left_image.type() != CV_8UC1 || right_image.type() != CV_8UC1) {
         LOG_ERROR("输入图像必须是单通道灰度图 (CV_8UC1)");
         return false;
@@ -77,23 +107,39 @@ bool StereoRectifier::rectifyPair(const cv::Mat& left_image,
     auto start_time = std::chrono::high_resolution_clock::now();
     
     try {
-        // 执行校正
-        cv::remap(left_image, left_rectified, m_left_map1, m_left_map2, 
-                 cv::INTER_LINEAR, cv::BORDER_CONSTANT);
-        cv::remap(right_image, right_rectified, m_right_map1, m_right_map2, 
-                 cv::INTER_LINEAR, cv::BORDER_CONSTANT);
-        
-        // 如果要求裁剪到有效区域
-        if (crop_to_valid_roi) {
-            left_rectified = left_rectified(m_valid_roi_left);
-            right_rectified = right_rectified(m_valid_roi_right);
+        if (mode == RectificationMode::SCALE_TO_FIT && !m_combined_left_map1.empty()) {
+            cv::remap(left_image, left_rectified, 
+                     m_combined_left_map1, m_combined_left_map2,
+                     cv::INTER_LINEAR, cv::BORDER_CONSTANT, 0);
+            cv::remap(right_image, right_rectified,
+                     m_combined_right_map1, m_combined_right_map2,
+                     cv::INTER_LINEAR, cv::BORDER_CONSTANT, 0);
+        } else if (mode == RectificationMode::CROP_ONLY) {
+            cv::Mat left_tmp, right_tmp;
+            cv::remap(left_image, left_tmp, 
+                     m_left_map1, m_left_map2,
+                     cv::INTER_LINEAR, cv::BORDER_CONSTANT, 0);
+            cv::remap(right_image, right_tmp,
+                     m_right_map1, m_right_map2,
+                     cv::INTER_LINEAR, cv::BORDER_CONSTANT, 0);
+            
+            left_rectified = left_tmp(m_valid_roi_left).clone();
+            right_rectified = right_tmp(m_valid_roi_right).clone();
+        } else {
+            cv::remap(left_image, left_rectified, 
+                     m_left_map1, m_left_map2,
+                     cv::INTER_LINEAR, cv::BORDER_CONSTANT, 0);
+            cv::remap(right_image, right_rectified,
+                     m_right_map1, m_right_map2,
+                     cv::INTER_LINEAR, cv::BORDER_CONSTANT, 0);
         }
         
         auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
             end_time - start_time);
         
-        LOG_DEBUG("立体校正完成: {:.2f} ms", duration.count() / 1000.0);
+        LOG_DEBUG("立体校正完成: 模式={}, 耗时={:.2f} ms", 
+                 modeToString(mode), duration.count() / 1000.0);
         
         return true;
         
@@ -101,7 +147,7 @@ bool StereoRectifier::rectifyPair(const cv::Mat& left_image,
         LOG_ERROR("OpenCV校正异常: {}", e.what());
         return false;
     } catch (const std::exception& e) {
-        LOG_ERROR("标准校正异常: {}", e.what());
+        LOG_ERROR("标准异常: {}", e.what());
         return false;
     }
 }
@@ -109,6 +155,8 @@ bool StereoRectifier::rectifyPair(const cv::Mat& left_image,
 bool StereoRectifier::rectifyBatch(const std::vector<std::pair<cv::Mat, cv::Mat>>& image_pairs,
                                  std::vector<std::pair<cv::Mat, cv::Mat>>& rectified_pairs,
                                  bool crop_to_valid_roi) {
+    (void)crop_to_valid_roi;
+    
     if (!m_initialized) {
         LOG_ERROR("校正器未初始化");
         return false;
@@ -116,7 +164,8 @@ bool StereoRectifier::rectifyBatch(const std::vector<std::pair<cv::Mat, cv::Mat>
     
     if (image_pairs.empty()) {
         LOG_WARN("输入图像对列表为空");
-        return true; // 空列表视为成功
+        rectified_pairs.clear();
+        return true;
     }
     
     LOG_INFO("批量校正 {} 对图像", image_pairs.size());
@@ -132,7 +181,7 @@ bool StereoRectifier::rectifyBatch(const std::vector<std::pair<cv::Mat, cv::Mat>
         const auto& [left, right] = image_pairs[i];
         
         cv::Mat left_rect, right_rect;
-        if (rectifyPair(left, right, left_rect, right_rect, crop_to_valid_roi)) {
+        if (rectifyPair(left, right, left_rect, right_rect, m_mode)) {
             rectified_pairs.emplace_back(left_rect, right_rect);
             success_count++;
             
@@ -142,7 +191,6 @@ bool StereoRectifier::rectifyBatch(const std::vector<std::pair<cv::Mat, cv::Mat>
         } else {
             LOG_ERROR("第 {} 对图像校正失败", i + 1);
             all_success = false;
-            // 添加空图像对保持索引一致
             rectified_pairs.emplace_back(cv::Mat(), cv::Mat());
         }
     }
@@ -151,80 +199,51 @@ bool StereoRectifier::rectifyBatch(const std::vector<std::pair<cv::Mat, cv::Mat>
     auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
         total_end - total_start);
     
-    double avg_time = total_duration.count() / static_cast<double>(success_count);
+    double avg_time = success_count > 0 ? 
+        total_duration.count() / static_cast<double>(success_count) : 0.0;
     LOG_INFO("批量校正完成: {}/{} 成功, 总耗时: {:.2f} ms, 平均: {:.2f} ms/对",
              success_count, image_pairs.size(), total_duration.count(), avg_time);
     
     return all_success;
 }
 
-bool StereoRectifier::computeRectificationMaps() {
-    LOG_INFO("计算立体校正映射表...");
-    
-    try {
-        // 左相机校正映射
-        cv::initUndistortRectifyMap(
-            m_params.camera_matrix_left,
-            m_params.dist_coeffs_left,
-            m_params.rectification_left,    // R1
-            m_params.projection_left,        // P1
-            m_image_size,
-            CV_32FC1,                        // map1类型
-            m_left_map1,
-            m_left_map2
-        );
-        
-        // 右相机校正映射
-        cv::initUndistortRectifyMap(
-            m_params.camera_matrix_right,
-            m_params.dist_coeffs_right,
-            m_params.rectification_right,    // R2
-            m_params.projection_right,       // P2
-            m_image_size,
-            CV_32FC1,                        // map1类型
-            m_right_map1,
-            m_right_map2
-        );
-        
-        LOG_INFO("校正映射表计算完成");
-        LOG_DEBUG("左映射表尺寸: {}x{} (type={})", 
-                 m_left_map1.cols, m_left_map1.rows, m_left_map1.type());
-        LOG_DEBUG("右映射表尺寸: {}x{} (type={})", 
-                 m_right_map1.cols, m_right_map1.rows, m_right_map1.type());
-        
-        return true;
-        
-    } catch (const cv::Exception& e) {
-        LOG_ERROR("计算校正映射表异常: {}", e.what());
-        return false;
-    } catch (const std::exception& e) {
-        LOG_ERROR("计算校正映射表标准异常: {}", e.what());
-        return false;
-    }
-}
+// ==================== 校正参数计算 ====================
 
 void StereoRectifier::computeValidROI() {
     LOG_INFO("计算有效区域ROI...");
     
-    // 创建一个空白图像来测试有效区域
     cv::Mat test_image = cv::Mat::zeros(m_image_size, CV_8UC1);
+    
+    cv::Mat left_map1, left_map2, right_map1, right_map2;
+    cv::initUndistortRectifyMap(
+        m_params.camera_matrix_left,
+        m_params.dist_coeffs_left,
+        m_params.rectification_left,
+        m_params.projection_left,
+        m_image_size,
+        CV_32FC1,
+        left_map1,
+        left_map2
+    );
+    
+    cv::initUndistortRectifyMap(
+        m_params.camera_matrix_right,
+        m_params.dist_coeffs_right,
+        m_params.rectification_right,
+        m_params.projection_right,
+        m_image_size,
+        CV_32FC1,
+        right_map1,
+        right_map2
+    );
+    
     cv::Mat rectified_left, rectified_right;
-    
-    // 校正测试图像
-    if (!rectifyPair(test_image, test_image, rectified_left, rectified_right, false)) {
-        LOG_WARN("无法计算有效区域ROI，使用全图");
-        m_valid_roi_left = cv::Rect(0, 0, m_image_size.width, m_image_size.height);
-        m_valid_roi_right = cv::Rect(0, 0, m_image_size.width, m_image_size.height);
-        return;
-    }
-    
-    // 找到非零区域（校正后图像有效部分）
-    cv::Mat left_mask = (rectified_left > 0);
-    cv::Mat right_mask = (rectified_right > 0);
+    cv::remap(test_image, rectified_left, left_map1, left_map2, cv::INTER_LINEAR);
+    cv::remap(test_image, rectified_right, right_map1, right_map2, cv::INTER_LINEAR);
     
     std::vector<cv::Point> left_points, right_points;
-    cv::findNonZero(left_mask, left_points);
-    cv::findNonZero(right_mask, right_points);
+    cv::findNonZero(rectified_left > 0, left_points);
+    cv::findNonZero(rectified_right > 0, right_points);
     
     if (left_points.empty() || right_points.empty()) {
         LOG_WARN("校正后图像完全无效，使用全图");
@@ -233,13 +252,10 @@ void StereoRectifier::computeValidROI() {
         return;
     }
     
-    // 计算边界框
     m_valid_roi_left = cv::boundingRect(left_points);
     m_valid_roi_right = cv::boundingRect(right_points);
     
-    // 确保两个ROI大小一致（取交集）
     cv::Rect common_roi = m_valid_roi_left & m_valid_roi_right;
-    
     if (common_roi.area() > 0) {
         m_valid_roi_left = common_roi;
         m_valid_roi_right = common_roi;
@@ -256,31 +272,219 @@ void StereoRectifier::computeValidROI() {
              (m_valid_roi_right.area() * 100.0) / (m_image_size.area()));
 }
 
+void StereoRectifier::computeScalingParameters() {
+    LOG_INFO("计算缩放参数 (SCALE_TO_FIT模式)...");
+    
+    cv::Rect roi = m_valid_roi_left;
+    m_scale_info.roi = roi;
+    
+    float scale_x = static_cast<float>(m_image_size.width) / roi.width;
+    float scale_y = static_cast<float>(m_image_size.height) / roi.height;
+    m_scale_info.scale_factor = std::min(scale_x, scale_y);
+    
+    m_scale_info.scaled_size.width = static_cast<int>(roi.width * m_scale_info.scale_factor + 0.5f);
+    m_scale_info.scaled_size.height = static_cast<int>(roi.height * m_scale_info.scale_factor + 0.5f);
+    
+    m_scale_info.offset.x = (m_image_size.width - m_scale_info.scaled_size.width) / 2;
+    m_scale_info.offset.y = (m_image_size.height - m_scale_info.scaled_size.height) / 2;
+    
+    float original_effective = roi.area() / static_cast<float>(m_image_size.area());
+    float scaled_effective = m_scale_info.scaled_size.area() / static_cast<float>(m_image_size.area());
+    m_scale_info.effective_ratio = scaled_effective;
+    
+    LOG_INFO("缩放参数:");
+    LOG_INFO("  原始ROI: {}x{} (位置: {}, {})", roi.width, roi.height, roi.x, roi.y);
+    LOG_INFO("  缩放因子: {:.3f}", m_scale_info.scale_factor);
+    LOG_INFO("  缩放后尺寸: {}x{}", m_scale_info.scaled_size.width, m_scale_info.scaled_size.height);
+    LOG_INFO("  填充偏移: ({}, {})", m_scale_info.offset.x, m_scale_info.offset.y);
+    LOG_INFO("  有效像素比例: 原始{:.1f}% → 缩放后{:.1f}%", 
+             original_effective * 100.0, scaled_effective * 100.0);
+}
+
+bool StereoRectifier::computeRectificationMaps() {
+    LOG_INFO("计算校正映射表 (模式: {})...", modeToString(m_mode));
+    
+    try {
+        if (m_mode == RectificationMode::SCALE_TO_FIT) {
+            return createCombinedMaps();
+        } else {
+            cv::initUndistortRectifyMap(
+                m_params.camera_matrix_left,
+                m_params.dist_coeffs_left,
+                m_params.rectification_left,
+                m_params.projection_left,
+                m_image_size,
+                CV_32FC1,
+                m_left_map1,
+                m_left_map2
+            );
+            
+            cv::initUndistortRectifyMap(
+                m_params.camera_matrix_right,
+                m_params.dist_coeffs_right,
+                m_params.rectification_right,
+                m_params.projection_right,
+                m_image_size,
+                CV_32FC1,
+                m_right_map1,
+                m_right_map2
+            );
+            
+            LOG_INFO("原始校正映射表计算完成");
+            m_output_size = m_image_size;
+            m_maps_computed = true;
+            return true;
+        }
+    } catch (const cv::Exception& e) {
+        LOG_ERROR("计算校正映射表异常: {}", e.what());
+        return false;
+    }
+}
+
+bool StereoRectifier::createCombinedMaps() {
+    LOG_INFO("创建组合映射表（校正+裁剪+缩放+填充）...");
+    
+    try {
+        cv::Mat left_map1, left_map2, right_map1, right_map2;
+        
+        cv::initUndistortRectifyMap(
+            m_params.camera_matrix_left,
+            m_params.dist_coeffs_left,
+            m_params.rectification_left,
+            m_params.projection_left,
+            m_image_size,
+            CV_32FC1,
+            left_map1,
+            left_map2
+        );
+        
+        cv::initUndistortRectifyMap(
+            m_params.camera_matrix_right,
+            m_params.dist_coeffs_right,
+            m_params.rectification_right,
+            m_params.projection_right,
+            m_image_size,
+            CV_32FC1,
+            right_map1,
+            right_map2
+        );
+        
+        m_combined_left_map1 = cv::Mat(m_image_size, CV_32FC1, cv::Scalar(0));
+        m_combined_left_map2 = cv::Mat(m_image_size, CV_32FC1, cv::Scalar(0));
+        m_combined_right_map1 = cv::Mat(m_image_size, CV_32FC1, cv::Scalar(0));
+        m_combined_right_map2 = cv::Mat(m_image_size, CV_32FC1, cv::Scalar(0));
+        
+        for (int y = 0; y < m_image_size.height; ++y) {
+            for (int x = 0; x < m_image_size.width; ++x) {
+                float scaled_x = (static_cast<float>(x - m_scale_info.offset.x)) / m_scale_info.scale_factor;
+                float scaled_y = (static_cast<float>(y - m_scale_info.offset.y)) / m_scale_info.scale_factor;
+                
+                float rectified_x = scaled_x + m_scale_info.roi.x;
+                float rectified_y = scaled_y + m_scale_info.roi.y;
+                
+                if (rectified_x >= 0 && rectified_x < m_image_size.width &&
+                    rectified_y >= 0 && rectified_y < m_image_size.height) {
+                    int rx = static_cast<int>(rectified_x + 0.5f);
+                    int ry = static_cast<int>(rectified_y + 0.5f);
+                    
+                    rx = std::min(std::max(rx, 0), m_image_size.width - 1);
+                    ry = std::min(std::max(ry, 0), m_image_size.height - 1);
+                    
+                    m_combined_left_map1.at<float>(y, x) = left_map1.at<float>(ry, rx);
+                    m_combined_left_map2.at<float>(y, x) = left_map2.at<float>(ry, rx);
+                    m_combined_right_map1.at<float>(y, x) = right_map1.at<float>(ry, rx);
+                    m_combined_right_map2.at<float>(y, x) = right_map2.at<float>(ry, rx);
+                } else {
+                    m_combined_left_map1.at<float>(y, x) = -1.0f;
+                    m_combined_left_map2.at<float>(y, x) = -1.0f;
+                    m_combined_right_map1.at<float>(y, x) = -1.0f;
+                    m_combined_right_map2.at<float>(y, x) = -1.0f;
+                }
+            }
+        }
+        
+        m_output_size = m_image_size;
+        m_maps_computed = true;
+        
+        LOG_INFO("组合映射表创建完成");
+        LOG_DEBUG("有效映射点比例: {:.1f}%", 
+                 100.0f * m_scale_info.effective_ratio);
+        
+        return true;
+        
+    } catch (const cv::Exception& e) {
+        LOG_ERROR("创建组合映射表异常: {}", e.what());
+        return false;
+    }
+}
+
+bool StereoRectifier::updateRectificationMaps() {
+    LOG_INFO("更新校正映射表 (模式改变为 {})", modeToString(m_mode));
+    
+    if (m_mode == RectificationMode::SCALE_TO_FIT) {
+        computeScalingParameters();
+    }
+    
+    m_maps_computed = false;
+    return computeRectificationMaps();
+}
+
+// ==================== 辅助方法 ====================
+
+void StereoRectifier::setMode(RectificationMode mode) {
+    if (mode != m_mode) {
+        LOG_INFO("切换校正模式: {} -> {}", modeToString(m_mode), modeToString(mode));
+        m_mode = mode;
+        if (m_initialized) {
+            updateRectificationMaps();
+        }
+    }
+}
+
+std::string StereoRectifier::modeToString(RectificationMode mode) const {
+    switch (mode) {
+        case RectificationMode::RAW:         return "RAW";
+        case RectificationMode::CROP_ONLY:   return "CROP_ONLY";
+        case RectificationMode::SCALE_TO_FIT:return "SCALE_TO_FIT";
+        default:                            return "UNKNOWN";
+    }
+}
+
 void StereoRectifier::reset() {
     LOG_INFO("重置立体校正处理器");
     
     m_params = CalibrationParams();
     m_image_size = cv::Size(0, 0);
+    m_output_size = cv::Size(0, 0);
     
     m_left_map1.release();
     m_left_map2.release();
     m_right_map1.release();
     m_right_map2.release();
     
+    m_combined_left_map1.release();
+    m_combined_left_map2.release();
+    m_combined_right_map1.release();
+    m_combined_right_map2.release();
+    
     m_valid_roi_left = cv::Rect();
     m_valid_roi_right = cv::Rect();
     
+    m_scale_info = ScaleInfo();
+    
     m_initialized = false;
+    m_maps_computed = false;
 }
+
+// ==================== 静态工具方法 ====================
 
 bool StereoRectifier::saveRectifiedImages(const cv::Mat& left_rectified,
                                          const cv::Mat& right_rectified,
                                          const std::string& output_dir,
                                          const std::string& filename) {
-    // 检查目录是否存在
     struct stat st;
     if (stat(output_dir.c_str(), &st) != 0) {
-        if (mkdir(output_dir.c_str(), 0777) != 0) {
+        if (mkdir(output_dir.c_str(), 0777) != 0 && errno != EEXIST) {
             LOG_ERROR("无法创建输出目录: {}", output_dir);
             return false;
         }
@@ -300,16 +504,47 @@ bool StereoRectifier::saveRectifiedImages(const cv::Mat& left_rectified,
             return false;
         }
         
-        LOG_INFO("校正图像已保存: {} 和 {}", left_path, right_path);
+        LOG_DEBUG("校正图像已保存: {} 和 {}", left_path, right_path);
         return true;
         
     } catch (const cv::Exception& e) {
         LOG_ERROR("保存校正图像异常: {}", e.what());
         return false;
-    } catch (const std::exception& e) {
-        LOG_ERROR("保存校正图像标准异常: {}", e.what());
-        return false;
     }
+}
+
+// ==================== 获取器实现 ====================
+
+const CalibrationParams& StereoRectifier::getCalibrationParams() const {
+    return m_params;
+}
+
+std::pair<cv::Mat, cv::Mat> StereoRectifier::getLeftMaps() const {
+    if (m_mode == RectificationMode::SCALE_TO_FIT && !m_combined_left_map1.empty()) {
+        return {m_combined_left_map1, m_combined_left_map2};
+    } else {
+        return {m_left_map1, m_left_map2};
+    }
+}
+
+std::pair<cv::Mat, cv::Mat> StereoRectifier::getRightMaps() const {
+    if (m_mode == RectificationMode::SCALE_TO_FIT && !m_combined_right_map1.empty()) {
+        return {m_combined_right_map1, m_combined_right_map2};
+    } else {
+        return {m_right_map1, m_right_map2};
+    }
+}
+
+std::pair<cv::Rect, cv::Rect> StereoRectifier::getValidROI() const {
+    return {m_valid_roi_left, m_valid_roi_right};
+}
+
+cv::Size StereoRectifier::getImageSize() const {
+    return m_image_size;
+}
+
+bool StereoRectifier::isInitialized() const {
+    return m_initialized;
 }
 
 } // namespace calibration
