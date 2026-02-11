@@ -10,241 +10,146 @@ namespace stereo_depth {
 namespace vulkan {
 
 /**
- * @brief 立体匹配流水线，整合所有Vulkan组件
- * 
- * 负责管理立体匹配的整个计算流程：
- * 1. 图像输入（左右图像）
- * 2. 代价计算
- * 3. 视差优化
- * 4. 结果输出
+ * @brief 立体匹配流水线（精简可靠版）
+ *
+ * 核心原则：
+ * - 每个着色器独占一个描述符集，布局严格匹配着色器
+ * - 使用手动创建描述符集布局，避免 Builder 潜在问题
+ * - 所有缓冲区均为 uint32_t 元素
+ * - CPU 缓存扩展图像数据，避免 GPU 回读
  */
 class StereoPipeline {
 public:
-    StereoPipeline() = delete;
-    StereoPipeline(const VulkanContext& context);
+    explicit StereoPipeline(const VulkanContext& context);
     ~StereoPipeline();
-    
-    // 禁止拷贝
+
+    // 禁止拷贝，允许移动
     StereoPipeline(const StereoPipeline&) = delete;
     StereoPipeline& operator=(const StereoPipeline&) = delete;
-    
-    // 允许移动
-    StereoPipeline(StereoPipeline&& other) noexcept;
-    StereoPipeline& operator=(StereoPipeline&& other) noexcept;
-    
+    StereoPipeline(StereoPipeline&&) = default;
+    StereoPipeline& operator=(StereoPipeline&&) = default;
+
     /**
      * @brief 初始化流水线
-     * @param imageWidth 图像宽度（压缩前的单眼宽度）
-     * @param imageHeight 图像高度
+     * @param camWidth  原始拼接图像宽度（例如640）
+     * @param camHeight 原始拼接图像高度（例如480）
      * @param maxDisparity 最大视差
-     * @return 是否初始化成功
      */
-    bool initialize(uint32_t imageWidth, uint32_t imageHeight, uint32_t maxDisparity);
-    
-    /**
-     * @brief 设置左图像数据（压缩前）
-     * @param data 图像数据指针（灰度图，8位/像素）
-     * @return 是否设置成功
-     */
+    bool initialize(uint32_t camWidth, uint32_t camHeight, uint32_t maxDisparity);
+
+    /// 设置左眼图像（压缩后尺寸，uint8_t 灰度）
     bool setLeftImage(const uint8_t* data);
-    
-    /**
-     * @brief 设置右图像数据（压缩前）
-     * @param data 图像数据指针（灰度图，8位/像素）
-     * @return 是否设置成功
-     */
+    /// 设置右眼图像（压缩后尺寸，uint8_t 灰度）
     bool setRightImage(const uint8_t* data);
-    
-    /**
-     * @brief 执行立体匹配计算
-     * @return 是否计算成功
-     */
+
+    /// 执行完整立体匹配流水线
     bool compute();
-    
-    /**
-     * @brief 获取视差图（压缩后尺寸）
-     * @param output 输出缓冲区，需要预分配compressedWidth * compressedHeight * sizeof(uint16_t)字节
-     * @return 是否获取成功
-     */
+
+    /// 获取视差图（16位，输出缓冲区需预分配 w*h*sizeof(uint16_t)）
     bool getDisparityMap(uint16_t* output);
-    
-    /**
-     * @brief 获取中间结果（用于调试）
-     * @param bufferIndex 缓冲区索引
-     * @param output 输出缓冲区
-     * @param size 缓冲区大小
-     * @return 是否获取成功
-     */
-    bool getIntermediateResult(uint32_t bufferIndex, void* output, size_t size);
-    
-    /**
-     * @brief 获取压缩前图像宽度
-     */
-    uint32_t getOriginalImageWidth() const { return m_originalImageWidth; }
-    
-    /**
-     * @brief 获取压缩前图像高度
-     */
-    uint32_t getOriginalImageHeight() const { return m_originalImageHeight; }
-    
-    /**
-     * @brief 获取压缩后图像宽度
-     */
-    uint32_t getCompressedImageWidth() const { return m_compressedImageWidth; }
-    
-    /**
-     * @brief 获取压缩后图像高度
-     */
-    uint32_t getCompressedImageHeight() const { return m_compressedImageHeight; }
-    
-    /**
-     * @brief 获取最大视差
-     */
-    uint32_t getMaxDisparity() const { return m_maxDisparity; }
-    
-    /**
-     * @brief 检查是否已初始化
-     */
-    bool isInitialized() const { return m_initialized; }
-    
+
+    /// 获取中间结果（调试）
+    bool getIntermediateResult(uint32_t index, void* output, size_t size);
+
+    /// 获取中心像素（160,240）的Census描述符（用于验证数据通路）
+    bool getCenterCensus(uint32_t& leftLow, uint32_t& leftHigh,
+                         uint32_t& rightLow, uint32_t& rightHigh);
+
+    // 访问器
+    uint32_t getCompressedWidth()  const { return m_compW; }
+    uint32_t getCompressedHeight() const { return m_compH; }
+    uint32_t getMaxDisparity()     const { return m_maxDisp; }
+    bool     isInitialized()       const { return m_initialized; }
+
 private:
-    const VulkanContext& m_context;
-    
-    // 原始图像参数
-    uint32_t m_originalImageWidth = 0;
-    uint32_t m_originalImageHeight = 0;
-    
-    // 压缩后图像参数
-    uint32_t m_compressedImageWidth = 0;
-    uint32_t m_compressedImageHeight = 0;
-    
-    // 视差参数
-    uint32_t m_maxDisparity = 64;
+    const VulkanContext& m_ctx;
+
+    // 尺寸参数
+    uint32_t m_origW = 0;   // 原始拼接宽度（640）
+    uint32_t m_origH = 0;   // 原始拼接高度（480）
+    uint32_t m_compW = 0;   // 压缩后单眼宽度（320）
+    uint32_t m_compH = 0;   // 压缩后高度（480）
+    uint32_t m_maxDisp = 64;
     bool m_initialized = false;
-    
-    // 原始输入缓冲区（压缩前）
-    std::unique_ptr<BufferManager> m_leftImageBuffer;
-    std::unique_ptr<BufferManager> m_rightImageBuffer;
-    
-    // 拼接图像缓冲区（压缩后，左右拼接）
-    std::unique_ptr<BufferManager> m_stitchedImageBuffer;
-    
-    // Census变换输出缓冲区（双输出，压缩后尺寸）
-    std::unique_ptr<BufferManager> m_leftCensusBuffer;
-    std::unique_ptr<BufferManager> m_rightCensusBuffer;
-    std::unique_ptr<BufferManager> m_censusDebugBuffer;
-    
-    // 中间结果缓冲区（压缩后尺寸）
-    std::unique_ptr<BufferManager> m_costVolumeBuffer;
-    std::unique_ptr<BufferManager> m_disparityBuffer;
-    std::unique_ptr<BufferManager> m_tempBuffer1;
-    std::unique_ptr<BufferManager> m_tempBuffer2;
-    
-    // 参数缓冲区
-    std::unique_ptr<BufferManager> m_paramsBuffer;
-    
-    // 计算管线
-    std::unique_ptr<ComputePipeline> m_censusPipeline;
-    std::unique_ptr<ComputePipeline> m_costPipeline;
-    std::unique_ptr<ComputePipeline> m_aggregationPipeline;
-    std::unique_ptr<ComputePipeline> m_wtaPipeline;
-    std::unique_ptr<ComputePipeline> m_postprocessPipeline;
-    
-    // 描述符集布局
-    VkDescriptorSetLayout m_censusLayout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout m_costLayout = VK_NULL_HANDLE;
+
+    // ------------------------------------------------------------
+    // CPU 端图像缓存（32位扩展），用于拼接，避免GPU回读
+    // ------------------------------------------------------------
+    std::vector<uint32_t> m_leftCpu;
+    std::vector<uint32_t> m_rightCpu;
+
+    // ------------------------------------------------------------
+    // GPU 缓冲区（全部使用 uint32_t 元素）
+    // ------------------------------------------------------------
+    std::unique_ptr<BufferManager> m_leftImgBuf;      // 压缩后单眼，w*h*4
+    std::unique_ptr<BufferManager> m_rightImgBuf;     // 同上
+    std::unique_ptr<BufferManager> m_stitchedBuf;     // 拼接图像，w*2 * h *4
+
+    std::unique_ptr<BufferManager> m_leftCensusBuf;   // 左 Census，w*h *2*4
+    std::unique_ptr<BufferManager> m_rightCensusBuf;  // 右 Census，w*h *2*4
+
+    std::unique_ptr<BufferManager> m_costVolBuf;      // 代价立方体，w*h*maxDisp*4
+    std::unique_ptr<BufferManager> m_disparityBuf;    // 视差图，w*h*4
+
+    std::unique_ptr<BufferManager> m_tempBuf1;        // 临时（聚合代价）
+    std::unique_ptr<BufferManager> m_tempBuf2;        // 临时（后处理）
+
+    std::unique_ptr<BufferManager> m_paramsBuf;       // Uniform 参数，sizeof(PipelineParams)
+
+    // 调试缓冲区（每个步骤独立）
+    std::unique_ptr<BufferManager> m_censusDbgBuf;
+    std::unique_ptr<BufferManager> m_costDbgBuf;
+    std::unique_ptr<BufferManager> m_wtaDbgBuf;
+    std::unique_ptr<BufferManager> m_postDbgBuf;
+
+    // ------------------------------------------------------------
+    // 描述符集布局（每个管线一个，手动创建）
+    // ------------------------------------------------------------
+    VkDescriptorSetLayout m_censusLayout   = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_costLayout     = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_aggregationLayout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout m_wtaLayout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout m_postprocessLayout = VK_NULL_HANDLE;
-    
-    void cleanup();
-    
-    /**
-     * @brief 创建所有缓冲区
-     */
-    bool createBuffers();
-    
-    /**
-     * @brief 创建所有计算管线
-     */
-    bool createPipelines();
-    
-    /**
-     * @brief 加载着色器文件
-     * @param pipeline 管线对象
-     * @param shaderName 着色器文件名（不带路径）
-     * @return 是否加载成功
-     */
-    bool loadShader(ComputePipeline& pipeline, const std::string& shaderName);
-    
-    /**
-     * @brief 检查着色器文件是否存在
-     * @param shaderName 着色器文件名
-     * @return 是否存在
-     */
-    bool checkShaderExists(const std::string& shaderName);
-    
-    /**
-     * @brief 创建描述符集布局
-     */
-    bool createDescriptorSetLayouts();
-    
-    /**
-     * @brief 执行单步计算
-     * @param pipeline 计算管线
-     * @param groupCountX X方向工作组数量
-     * @param groupCountY Y方向工作组数量
-     */
-    bool executePipelineStep(ComputePipeline& pipeline, 
-                            uint32_t groupCountX, 
-                            uint32_t groupCountY);
-    
-    /**
-     * @brief 压缩并拼接左右图像
-     * @return 是否成功
-     * 
-     * 将左右原始图像（各1080x720）压缩为540x720，
-     * 然后拼接成一张1080x720的图像
-     */
-    bool compressAndStitchImages();
-    
-    /**
-     * @brief 计算图像压缩平均值（简单算法）
-     * @param src 源图像数据
-     * @param srcWidth 源图像宽度
-     * @param srcHeight 源图像高度
-     * @param dstWidth 目标图像宽度
-     * @param dstHeight 目标图像高度
-     * @return 压缩后的图像数据
-     */
-    std::vector<uint8_t> compressImage(const uint8_t* src, 
-                                      uint32_t srcWidth, uint32_t srcHeight,
-                                      uint32_t dstWidth, uint32_t dstHeight);
-    
-    // 计算参数结构
+    VkDescriptorSetLayout m_wtaLayout      = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_postLayout     = VK_NULL_HANDLE;
+
+    // ------------------------------------------------------------
+    // 计算管线
+    // ------------------------------------------------------------
+    std::unique_ptr<ComputePipeline> m_censusPipe;
+    std::unique_ptr<ComputePipeline> m_costPipe;
+    std::unique_ptr<ComputePipeline> m_aggregationPipe;
+    std::unique_ptr<ComputePipeline> m_wtaPipe;
+    std::unique_ptr<ComputePipeline> m_postPipe;
+
+    // ------------------------------------------------------------
+    // 私有方法
+    // ------------------------------------------------------------
+    bool createAllBuffers();
+    bool createAllDescriptorSetLayouts();
+    bool createAllPipelines();
+    bool loadShader(ComputePipeline& pipe, const std::string& name);
+    bool executePipeline(ComputePipeline& pipe, uint32_t gx, uint32_t gy);
+
+    void expand8To32(const uint8_t* src, uint32_t* dst, size_t count);
+    bool uploadAndStitch();   // 使用CPU缓存拼接
+
+    // PipelineParams 必须与着色器的 Parameters 完全一致（std140，64字节）
     struct PipelineParams {
-        uint32_t compressedImageWidth;   // 压缩后单眼宽度（对应着色器imageWidth）
-        uint32_t compressedImageHeight;  // 压缩后高度（对应着色器imageHeight）
-        uint32_t maxDisparity;           // 最大视差
-        uint32_t windowSize;             // Census窗口大小
-        
-        float uniquenessRatio;           // 唯一性比率
-        float penaltyP1;                 // 惩罚项P1
-        float penaltyP2;                 // 惩罚项P2
-        uint32_t flags;                  // 标志位
-        
-        uint32_t speckleWindow;          // 斑点窗口大小
-        uint32_t speckleRange;           // 斑点范围
-        uint32_t medianSize;             // 中值滤波大小
-        uint32_t padding[3];             // 补齐到64字节对齐（着色器需要）
-        
-        // 额外字段使总大小达到64字节（着色器不访问这些）
-        uint32_t reserved1;
-        uint32_t reserved2;
+        uint32_t width;        // 偏移 0
+        uint32_t height;       // 偏移 4
+        uint32_t maxDisparity; // 偏移 8
+        uint32_t windowSize;   // 偏移 12
+        float uniquenessRatio; // 偏移 16
+        float penaltyP1;       // 偏移 20
+        float penaltyP2;       // 偏移 24
+        uint32_t flags;        // 偏移 28
+        uint32_t speckleWindow; // 偏移 32
+        uint32_t speckleRange;  // 偏移 36
+        uint32_t medianSize;    // 偏移 40
+        uint32_t padding[3];    // 偏移 44,48,52
+        uint32_t reserved1;     // 偏移 56
+        uint32_t reserved2;     // 偏移 60
     };
-    
-    static_assert(sizeof(PipelineParams) == 64, 
-                  "PipelineParams must be 64 bytes");
+    static_assert(sizeof(PipelineParams) == 64, "PipelineParams must be 64 bytes");
 };
 
 } // namespace vulkan
