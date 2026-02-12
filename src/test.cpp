@@ -1,342 +1,196 @@
-/**
- * @file test.cpp
- * @brief OrangePiZero3 立体深度 GPU 系统测试主程序
- * @author C01-JNU
- * @date 2026-02-11
- *
- * 功能：
- * 1. 加载全局配置 global_config.yaml
- * 2. 初始化 Vulkan 上下文与立体匹配流水线
- * 3. 从 images/test 目录读取所有拼接图像
- * 4. 执行 GPU 立体匹配，生成视差图
- * 5. 保存视差图及调试信息到 images/output
- */
+#include <iostream>
+#include <opencv2/opencv.hpp>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <chrono>
+#include <vector>
+#include <string>
+#include <algorithm>
 
 #include "vulkan/context.hpp"
-#include "vulkan/buffer_manager.hpp"
-#include "vulkan/compute_pipeline.hpp"
 #include "vulkan/stereo_pipeline.hpp"
 #include "utils/logger.hpp"
 #include "utils/config.hpp"
 
-#include <opencv2/opencv.hpp>
-#include <filesystem>
-#include <fstream>
-#include <algorithm>
-#include <chrono>
-
-namespace fs = std::filesystem;
 using namespace stereo_depth;
+using namespace stereo_depth::vulkan;
 
-// ------------------------------------------------------------
-// 辅助函数（中文日志）
-// ------------------------------------------------------------
-
-/**
- * @brief 确保目录存在，不存在则创建
- */
-static bool ensureDirectoryExists(const std::string& dir) {
-    try {
-        if (!fs::exists(dir)) {
-            if (!fs::create_directories(dir)) {
-                LOG_ERROR("❌ 无法创建目录: {}", dir);
-                return false;
-            }
-            LOG_INFO("📁 创建目录: {}", dir);
-        }
-        return true;
-    } catch (const std::exception& e) {
-        LOG_ERROR("❌ 创建目录异常: {}", e.what());
-        return false;
+// 判断文件是否为图像（通过扩展名）
+bool isImageFile(const std::string& filename) {
+    std::string ext;
+    size_t pos = filename.rfind('.');
+    if (pos != std::string::npos) {
+        ext = filename.substr(pos);
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp";
     }
+    return false;
 }
 
-/**
- * @brief 加载拼接图像并分割为左右眼（压缩后尺寸）
- * @param imagePath   拼接图像路径（640x480，左眼320x480，右眼320x480）
- * @param leftImg     输出左眼图像（CV_8U, 320x480）
- * @param rightImg    输出右眼图像（CV_8U, 320x480）
- * @param config      配置对象
- */
-static bool loadAndSplitImage(const std::string& imagePath,
-                              cv::Mat& leftImg, cv::Mat& rightImg,
-                              const utils::Config& config) {
-    uint32_t camW = config.get<uint32_t>("camera.width");      // 640
-    uint32_t camH = config.get<uint32_t>("camera.height");     // 480
-    uint32_t stereoW = config.get<uint32_t>("stereo.image_width");  // 320
-    uint32_t stereoH = config.get<uint32_t>("stereo.image_height"); // 480
-
-    cv::Mat full = cv::imread(imagePath, cv::IMREAD_GRAYSCALE);
-    if (full.empty()) {
-        LOG_ERROR("❌ 无法读取图像: {}", imagePath);
-        return false;
-    }
-
-    if (full.cols != (int)camW || full.rows != (int)camH) {
-        LOG_ERROR("❌ 图像尺寸不匹配: 期望 {}x{}, 实际 {}x{}",
-                  camW, camH, full.cols, full.rows);
-        return false;
-    }
-
-    leftImg  = full(cv::Rect(0, 0, stereoW, stereoH)).clone();
-    rightImg = full(cv::Rect(stereoW, 0, stereoW, stereoH)).clone();
-
-    LOG_DEBUG("✅ 图像分割: 左 {}x{}，右 {}x{}",
-              leftImg.cols, leftImg.rows, rightImg.cols, rightImg.rows);
-    return true;
-}
-
-/**
- * @brief 保存视差图（16位原始数据 + 8位彩色可视化）
- * @param disparityData GPU回读的16位视差数据
- * @param width   视差图宽度（压缩后）
- * @param height  视差图高度
- * @param basePath 输出文件前缀（不含扩展名）
- * @param config  配置对象
- */
-static bool saveDisparityMap(const uint16_t* disparityData,
-                             uint32_t width, uint32_t height,
-                             const std::string& basePath,
-                             const utils::Config& config) {
-    // 创建输出目录
-    std::string outDir = fs::path(basePath).parent_path().string();
-    if (!ensureDirectoryExists(outDir)) return false;
-
-    // 保存原始16位数据
-    std::string rawPath = basePath + "_raw.bin";
-    std::ofstream rawFile(rawPath, std::ios::binary);
-    if (rawFile) {
-        rawFile.write(reinterpret_cast<const char*>(disparityData),
-                      width * height * sizeof(uint16_t));
-        rawFile.close();
-        LOG_INFO("💾 原始视差数据保存: {}", rawPath);
-    }
-
-    // 转换为8位可视化图像
-    cv::Mat disp16(height, width, CV_16UC1, const_cast<uint16_t*>(disparityData));
-    cv::Mat disp8;
-    double minVal, maxVal;
-    cv::minMaxLoc(disp16, &minVal, &maxVal);
-    uint32_t maxDisp = config.get<uint32_t>("stereo.max_disparity", 64);
-
-    if (maxVal > 0) {
-        double scale = 255.0 / std::min((double)maxDisp, maxVal);
-        disp16.convertTo(disp8, CV_8UC1, scale);
-    } else {
-        disp8 = cv::Mat(height, width, CV_8UC1, cv::Scalar(0));
-    }
-
-    cv::Mat color;
-    cv::applyColorMap(disp8, color, cv::COLORMAP_JET);
-    std::string ext = config.get<std::string>("output.output_format", "png");
-    std::string visPath = basePath + "." + ext;
-    if (cv::imwrite(visPath, color)) {
-        LOG_INFO("🖼️ 视差图保存: {}", visPath);
-        LOG_INFO("📊 视差统计: 最小值={:.0f}, 最大值={:.0f}, 配置最大视差={}",
-                 minVal, maxVal, maxDisp);
-        return true;
-    } else {
-        LOG_ERROR("❌ 保存视差图失败: {}", visPath);
-        return false;
-    }
-}
-
-/**
- * @brief 查找目录中的所有图像文件（jpg/png/bmp）
- */
-static std::vector<std::string> findTestImages(const std::string& dir) {
+// 获取目录下所有图像文件的完整路径
+std::vector<std::string> listImageFiles(const std::string& dir) {
     std::vector<std::string> files;
-    if (!fs::exists(dir)) {
-        LOG_ERROR("❌ 测试图像目录不存在: {}", dir);
+    DIR* dp = opendir(dir.c_str());
+    if (!dp) {
+        LOG_ERROR("无法打开目录: {}", dir);
         return files;
     }
-
-    for (const auto& entry : fs::directory_iterator(dir)) {
-        if (!entry.is_regular_file()) continue;
-        std::string ext = entry.path().extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-        if (ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp") {
-            files.push_back(entry.path().string());
+    struct dirent* entry;
+    while ((entry = readdir(dp))) {
+        std::string name = entry->d_name;
+        if (name == "." || name == "..") continue;
+        if (isImageFile(name)) {
+            files.push_back(dir + "/" + name);
         }
     }
-    std::sort(files.begin(), files.end());
-    LOG_INFO("🔍 找到 {} 个测试图像", files.size());
+    closedir(dp);
+    std::sort(files.begin(), files.end()); // 按名称排序，保证可重复性
     return files;
 }
 
-// ------------------------------------------------------------
-// 主函数
-// ------------------------------------------------------------
-int main(int argc, char* argv[]) {
-    auto totalStart = std::chrono::high_resolution_clock::now();
+// 确保目录存在
+bool ensureDirectory(const std::string& path) {
+    struct stat st;
+    if (stat(path.c_str(), &st) == 0) {
+        if (S_ISDIR(st.st_mode)) return true;
+        LOG_ERROR("路径存在但不是目录: {}", path);
+        return false;
+    }
+    if (mkdir(path.c_str(), 0755) == 0) return true;
+    LOG_ERROR("创建目录失败: {}", path);
+    return false;
+}
 
-    // 1. 初始化日志（中文）
-    utils::Logger::initialize("test", spdlog::level::info);
-    LOG_INFO("========================================");
-    LOG_INFO("   OrangePiZero3 立体深度 GPU 测试");
-    LOG_INFO("========================================");
+int main(int argc, char** argv) {
+    // 初始化日志
+    utils::Logger::initialize("batch", spdlog::level::info);
+    LOG_INFO("=========================================");
+    LOG_INFO("  立体匹配批量处理工具启动");
+    LOG_INFO("=========================================");
 
-    // 2. 加载配置
-    LOG_INFO("\n[1/6] 加载配置文件");
-    utils::Config config;
-    if (!config.loadFromFile("config/global_config.yaml")) {
-        LOG_ERROR("❌ 无法加载配置文件: config/global_config.yaml");
-        return EXIT_FAILURE;
+    // 1. 加载全局配置
+    auto& cfg_mgr = utils::ConfigManager::getInstance();
+    if (!cfg_mgr.loadGlobalConfig("config/global_config.yaml")) {
+        LOG_ERROR("加载全局配置失败");
+        return -1;
+    }
+    const auto& cfg = cfg_mgr.getConfig();
+
+    // 2. 读取配置参数
+    std::string test_dir = cfg.get<std::string>("output.test_image_dir", "images/test");
+    std::string out_dir  = cfg.get<std::string>("output.output_dir", "images/output");
+    uint32_t cam_width   = cfg.get<uint32_t>("camera.width", 640);
+    uint32_t cam_height  = cfg.get<uint32_t>("camera.height", 480);
+    uint32_t single_width = cam_width / 2;   // 单眼宽度
+
+    LOG_INFO("测试图像目录: {}", test_dir);
+    LOG_INFO("输出目录:     {}", out_dir);
+    LOG_INFO("拼接图像尺寸: {}x{}", cam_width, cam_height);
+    LOG_INFO("单眼尺寸:     {}x{}", single_width, cam_height);
+
+    // 3. 确保输出目录存在
+    if (!ensureDirectory(out_dir)) {
+        LOG_ERROR("无法创建输出目录");
+        return -1;
     }
 
-    // 设置日志级别
-    int level = config.get<int>("system.debug_level", 2);
-    spdlog::level::level_enum logLevel = static_cast<spdlog::level::level_enum>(
-        std::clamp(level, 0, 5));
-    utils::Logger::setLevel(logLevel);
-    LOG_INFO("📋 日志级别: {}", spdlog::level::to_string_view(logLevel));
+    // 4. 获取所有待处理图像
+    std::vector<std::string> image_files = listImageFiles(test_dir);
+    if (image_files.empty()) {
+        LOG_ERROR("目录 {} 中没有找到图像文件", test_dir);
+        return -1;
+    }
+    LOG_INFO("找到 {} 个图像文件", image_files.size());
 
-    // 3. 设置 Mali-G31 必需的环境变量
-    setenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
-    LOG_INFO("🔧 环境变量: PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1");
-
-    // 4. 查找测试图像
-    LOG_INFO("\n[2/6] 扫描测试图像");
-    std::string testDir = config.get<std::string>("output.test_image_dir", "images/test");
-    std::vector<std::string> images = findTestImages(testDir);
-    if (images.empty()) {
-        LOG_ERROR("❌ 未找到测试图像，请检查目录: {}", testDir);
-        return EXIT_FAILURE;
+    // 5. 初始化 Vulkan 上下文（只做一次）
+    VulkanContext ctx;
+    if (!ctx.initialize()) {
+        LOG_ERROR("VulkanContext 初始化失败");
+        return -1;
     }
 
-    // 5. 初始化 Vulkan
-    LOG_INFO("\n[3/6] 初始化 Vulkan");
-    auto t0 = std::chrono::high_resolution_clock::now();
-    vulkan::VulkanContext ctx;
-    if (!ctx.initialize(false)) {
-        LOG_ERROR("❌ Vulkan 上下文初始化失败");
-        return EXIT_FAILURE;
-    }
-    auto t1 = std::chrono::high_resolution_clock::now();
-    LOG_INFO("✅ Vulkan 初始化完成 ({} ms)", 
-             std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
-    LOG_INFO("  设备: {}", ctx.getDeviceName());
-    LOG_INFO("  Vulkan 版本: {}", ctx.getVulkanVersion());
-
-    // 6. 创建立体匹配流水线
-    LOG_INFO("\n[4/6] 创建立体匹配流水线");
-    uint32_t camW   = config.get<uint32_t>("camera.width");
-    uint32_t camH   = config.get<uint32_t>("camera.height");
-    uint32_t maxDisp = config.get<uint32_t>("stereo.max_disparity", 64);
-
-    vulkan::StereoPipeline pipeline(ctx);
-    if (!pipeline.initialize(camW, camH, maxDisp)) {
-        LOG_ERROR("❌ 立体匹配流水线初始化失败");
-        return EXIT_FAILURE;
+    // 6. 初始化立体匹配流水线（只做一次）
+    StereoPipeline pipeline(ctx);
+    if (!pipeline.initialize()) {
+        LOG_ERROR("流水线初始化失败");
+        return -1;
     }
 
-    LOG_INFO("✅ 流水线初始化成功");
-    LOG_INFO("  压缩后尺寸: {}x{}", pipeline.getCompressedWidth(),
-             pipeline.getCompressedHeight());          // ✅ 修正
-    LOG_INFO("  最大视差: {}", pipeline.getMaxDisparity());
+    // 7. 批量处理
+    LOG_INFO("开始批量处理...");
+    auto total_start = std::chrono::high_resolution_clock::now();
+    int success_count = 0;
 
-    // 7. 批量处理图像
-    LOG_INFO("\n[5/6] 批量处理测试图像");
-    int success = 0, failed = 0;
-    std::string outDir = config.get<std::string>("output.output_dir", "images/output");
+    for (size_t i = 0; i < image_files.size(); ++i) {
+        const std::string& img_path = image_files[i];
+        LOG_INFO("[{}/{}] 处理: {}", i+1, image_files.size(), img_path);
 
-    for (size_t i = 0; i < images.size(); ++i) {
-        const std::string& path = images[i];
-        std::string name = fs::path(path).stem().string();
-        LOG_INFO("----------------------------------------");
-        LOG_INFO("[{}/{}] 处理: {}", i + 1, images.size(), fs::path(path).filename().string());
-
-        // 加载并分割图像
-        cv::Mat left, right;
-        if (!loadAndSplitImage(path, left, right, config)) {
-            failed++;
+        // 读取拼接图像
+        cv::Mat stitched = cv::imread(img_path, cv::IMREAD_COLOR);
+        if (stitched.empty()) {
+            LOG_WARN("  无法读取图像，跳过");
             continue;
         }
 
-        // 上传图像到 GPU
-        auto uploadStart = std::chrono::high_resolution_clock::now();
-        if (!pipeline.setLeftImage(left.data) || !pipeline.setRightImage(right.data)) {
-            LOG_ERROR("❌ 上传图像数据失败");
-            failed++;
-            continue;
-        }
-        auto uploadEnd = std::chrono::high_resolution_clock::now();
+        // 缩放到配置的拼接尺寸
+        cv::Mat resized;
+        cv::resize(stitched, resized, cv::Size(cam_width, cam_height));
+
+        // 转换为灰度并分割左右
+        cv::Mat gray;
+        cv::cvtColor(resized, gray, cv::COLOR_BGR2GRAY);
+        cv::Mat left_img  = gray(cv::Rect(0, 0, single_width, cam_height));
+        cv::Mat right_img = gray(cv::Rect(single_width, 0, single_width, cam_height));
+
+        // 上传图像到GPU
+        pipeline.setLeftImage(left_img.data);
+        pipeline.setRightImage(right_img.data);
 
         // 执行立体匹配
-        auto compStart = std::chrono::high_resolution_clock::now();
+        auto frame_start = std::chrono::high_resolution_clock::now();
         if (!pipeline.compute()) {
-            LOG_ERROR("❌ 立体匹配计算失败");
-            failed++;
+            LOG_WARN("  计算失败，跳过");
             continue;
         }
-        auto compEnd = std::chrono::high_resolution_clock::now();
+        auto frame_end = std::chrono::high_resolution_clock::now();
+        float frame_ms = std::chrono::duration<float, std::milli>(frame_end - frame_start).count();
 
-        // ========== 读取调试信息（关键！）==========
-        uint32_t censusDebug[8] = {0}, costDebug[8] = {0}, wtaDebug[8] = {0};
-        pipeline.getIntermediateResult(5, censusDebug, sizeof(censusDebug));
-        pipeline.getIntermediateResult(6, costDebug,   sizeof(costDebug));
-        pipeline.getIntermediateResult(7, wtaDebug,    sizeof(wtaDebug));
-
-        LOG_DEBUG("---- Census 调试 ----");
-        LOG_DEBUG("  尺寸: {}x{}, 窗口: {}, 配置一致: {}",
-                  censusDebug[0], censusDebug[1], censusDebug[2], censusDebug[3]);
-        LOG_DEBUG("  左描述符: {:#010x}{:08x}", censusDebug[5], censusDebug[4]);
-        LOG_DEBUG("  右描述符: {:#010x}{:08x}", censusDebug[7], censusDebug[6]);
-
-        LOG_DEBUG("---- Cost 调试 ----");
-        LOG_DEBUG("  尺寸: {}x{}, 最大视差: {}, 配置一致: {}",
-                  costDebug[0], costDebug[1], costDebug[2], costDebug[3]);
-        LOG_DEBUG("  左描述符: {:#010x}{:08x}", costDebug[5], costDebug[4]);
-        LOG_DEBUG("  右描述符: {:#010x}{:08x}", costDebug[7], costDebug[6]);
-        LOG_DEBUG("  第一个像素汉明距离 (d=0): {}", costDebug[7]);
-
-        LOG_DEBUG("---- WTA 调试 ----");
-        LOG_DEBUG("  最佳视差: {}, 最小代价: {}", wtaDebug[3], wtaDebug[4]);
-        LOG_DEBUG("  次佳视差: {}, 次小代价: {}", wtaDebug[5], wtaDebug[6]);
-        LOG_DEBUG("  唯一性: {}", wtaDebug[7] ? "是" : "否");
-
-        // 获取视差图（16位）
-        uint32_t w = pipeline.getCompressedWidth();    // ✅ 修正
-        uint32_t h = pipeline.getCompressedHeight();   // ✅ 修正
-        std::vector<uint16_t> disparity(w * h);
+        // 获取视差图
+        std::vector<uint16_t> disparity(pipeline.getBaseWidth() * pipeline.getBaseHeight());
         if (!pipeline.getDisparityMap(disparity.data())) {
-            LOG_ERROR("❌ 获取视差图失败");
-            failed++;
+            LOG_WARN("  获取视差图失败，跳过");
             continue;
         }
 
-        // 保存结果
-        std::string outPath = outDir + "/" + name + "_disparity";
-        if (saveDisparityMap(disparity.data(), w, h, outPath, config)) {
-            success++;
-            int uploadMs = std::chrono::duration_cast<std::chrono::milliseconds>(uploadEnd - uploadStart).count();
-            int compMs   = std::chrono::duration_cast<std::chrono::milliseconds>(compEnd - compStart).count();
-            LOG_INFO("⏱️ 上传: {} ms, 匹配: {} ms, 总计: {} ms, {:.1f} FPS",
-                     uploadMs, compMs, uploadMs + compMs,
-                     1000.0 / (uploadMs + compMs + 0.01));
-        } else {
-            failed++;
-        }
+        // 保存视差图（8位可视化）
+        cv::Mat disp_map(pipeline.getBaseHeight(), pipeline.getBaseWidth(), CV_16UC1, disparity.data());
+        double min_disp, max_disp;
+        cv::minMaxLoc(disp_map, &min_disp, &max_disp);
+        cv::Mat disp_8u;
+        disp_map.convertTo(disp_8u, CV_8U, 255.0 / (max_disp > 0 ? max_disp : 64.0));
+
+        // 生成输出文件名（保留原文件名，添加 _disparity 后缀）
+        std::string base_name = img_path.substr(img_path.find_last_of('/') + 1);
+        size_t dot_pos = base_name.rfind('.');
+        if (dot_pos != std::string::npos) base_name = base_name.substr(0, dot_pos);
+        std::string out_path = out_dir + "/" + base_name + "_disparity.png";
+
+        cv::imwrite(out_path, disp_8u);
+        LOG_INFO("  耗时: {:.2f} ms, 视差范围: {:.0f}-{:.0f}, 已保存: {}",
+                 frame_ms, min_disp, max_disp, out_path);
+        success_count++;
     }
 
-    // 8. 清理与汇总
-    LOG_INFO("\n[6/6] 清理资源");
-    ctx.waitIdle();
-
-    auto totalEnd = std::chrono::high_resolution_clock::now();
-    auto totalMs  = std::chrono::duration_cast<std::chrono::milliseconds>(totalEnd - totalStart).count();
-
-    LOG_INFO("\n========================================");
-    LOG_INFO("📊 测试汇总");
-    LOG_INFO("========================================");
-    LOG_INFO("  总运行时间: {} 秒", totalMs / 1000.0);
-    LOG_INFO("  图像总数: {}", images.size());
-    LOG_INFO("  成功: {}", success);
-    LOG_INFO("  失败: {}", failed);
-    LOG_INFO("  成功率: {:.1f}%", 100.0 * success / (success + failed + 0.01));
-    LOG_INFO("========================================");
-    LOG_INFO(success > 0 ? "✅ 测试通过！" : "❌ 测试失败！");
-    LOG_INFO("   输出目录: {}", outDir);
-
-    return success > 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    auto total_end = std::chrono::high_resolution_clock::now();
+    float total_sec = std::chrono::duration<float>(total_end - total_start).count();
+    LOG_INFO("=========================================");
+    LOG_INFO("批量处理完成");
+    LOG_INFO("成功: {} / {} 帧", success_count, image_files.size());
+    LOG_INFO("总耗时: {:.2f} 秒", total_sec);
+    if (success_count > 0) {
+        LOG_INFO("平均每帧: {:.2f} ms", total_sec * 1000.0 / success_count);
+    }
+    LOG_INFO("=========================================");
+    return 0;
 }

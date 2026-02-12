@@ -1,169 +1,38 @@
 #version 450
-// 代价聚合着色器
-// 功能：对代价立方体进行窗口聚合，提高匹配鲁棒性
-// 算法：使用5×5窗口，对每个视差平面分别进行均值/加权聚合
-// 输入：代价立方体 (压缩后宽度×压缩后高度×最大视差)
-// 输出：聚合后的代价立方体 (压缩后宽度×压缩后高度×最大视差)
-// 最后更新: 2026年2月8日
-// 作者: C01-JNU
-
-// 编译时插入的参数宏（由merge_shader.py自动插入）
 layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y, local_size_z = 1) in;
-
-// Uniform缓冲区（必须与C++端的PipelineParams完全匹配）
 layout(std140, binding = 0) uniform Parameters {
-    uint imageWidth;        // 偏移: 0 (C++端: compressedImageWidth)
-    uint imageHeight;       // 偏移: 4 (C++端: compressedImageHeight)
-    uint maxDisparity;      // 偏移: 8
-    uint windowSize;        // 偏移: 12
-
-    float uniquenessRatio;  // 偏移: 16
-    float penaltyP1;        // 偏移: 20
-    float penaltyP2;        // 偏移: 24
-    uint flags;             // 偏移: 28
-
-    uint speckleWindow;     // 偏移: 32
-    uint speckleRange;      // 偏移: 36
-    uint medianSize;        // 偏移: 40
-    uint padding[3];        // 偏移: 44, 48, 52
+    uint imageWidth, imageHeight, maxDisparity, windowSize;
+    float uniquenessRatio, penaltyP1, penaltyP2;
+    uint flags, speckleWindow, speckleRange, medianSize, padding[3];
 } params;
-
-// 输入缓冲区：原始代价立方体 (压缩后宽度×压缩后高度 × MAX_DISPARITY)
-// 布局：[像素0_视差0, 像素0_视差1, ..., 像素0_视差N, 像素1_视差0, ...]
-layout(binding = 0) readonly buffer InputCostVolumeBuffer {
-    uint data[];
-} inputCostBuffer;
-
-// 输出缓冲区：聚合后的代价立方体 (压缩后宽度×压缩后高度 × MAX_DISPARITY)
-// 布局与输入相同
-layout(binding = 1) writeonly buffer AggregatedCostVolumeBuffer {
-    uint data[];
-} aggregatedCostBuffer;
-
-// 临时缓冲区：用于中间计算
-layout(binding = 2) readonly buffer TempBuffer {
-    uint data[];
-} tempBuffer;
-
-// 调试缓冲区：用于验证和调试信息
-layout(binding = 3) writeonly buffer DebugBuffer {
-    uint info[8];
-} debugBuffer;
-
-// 聚合窗口半径（基于AGGREGATION_WINDOW宏，将在编译时插入）
-#define AGG_RADIUS ((AGGREGATION_WINDOW - 1) / 2)  // 对于5×5窗口，AGG_RADIUS=2
-
-// 辅助函数：获取原始代价
-uint getInputCost(uint x, uint y, uint disparity) {
-    // 边界检查
-    if (x >= IMAGE_WIDTH || y >= IMAGE_HEIGHT || disparity >= MAX_DISPARITY) {
-        return 64u; // 返回最大代价
-    }
-
-    uint pixelIndex = y * IMAGE_WIDTH + x;
-    uint costIndex = pixelIndex * MAX_DISPARITY + disparity;
-    return inputCostBuffer.data[costIndex];
-}
-
+layout(binding = 1) readonly buffer InputCost { uint cost[]; } inCost;
+layout(binding = 3) writeonly buffer OutputCost { uint cost[]; } outCost;
+layout(binding = 5) writeonly buffer Debug { uint data[]; } debug;
+#define AGG_RADIUS ((AGGREGATION_WINDOW - 1) / 2)
 void main() {
-    // 获取当前像素和视差
-    // 注意：我们将每个工作项处理一个像素的一个视差
-    uint pixelX = gl_GlobalInvocationID.x;
-    uint pixelY = gl_GlobalInvocationID.y;
-    uint disparity = gl_GlobalInvocationID.z;
-
-    // 边界检查（z维度是视差）
-    if (pixelX >= IMAGE_WIDTH || pixelY >= IMAGE_HEIGHT || disparity >= MAX_DISPARITY) {
-        return;
-    }
-
-    // 计算当前像素的索引
-    uint pixelIndex = pixelY * IMAGE_WIDTH + pixelX;
-    uint outputIndex = pixelIndex * MAX_DISPARITY + disparity;
-
-    // 初始化聚合代价
-    uint aggregatedCost = 0u;
-    uint validNeighbors = 0u;
-
-    // 检查是否为边界像素（聚合窗口会超出图像边界）
-    bool isBoundaryPixel = (pixelX < uint(AGG_RADIUS) || pixelX >= IMAGE_WIDTH - uint(AGG_RADIUS) ||
-                            pixelY < uint(AGG_RADIUS) || pixelY >= IMAGE_HEIGHT - uint(AGG_RADIUS));
-
-    // 简单均值聚合（可替换为加权聚合如引导滤波）
-    if (!isBoundaryPixel) {
-        // 非边界像素：使用完整的5×5窗口
-        for (int dy = -AGG_RADIUS; dy <= AGG_RADIUS; dy++) {
-            for (int dx = -AGG_RADIUS; dx <= AGG_RADIUS; dx++) {
-                uint neighborX = uint(int(pixelX) + dx);
-                uint neighborY = uint(int(pixelY) + dy);
-
-                // 获取邻居在相同视差下的代价
-                uint neighborCost = getInputCost(neighborX, neighborY, disparity);
-                aggregatedCost += neighborCost;
-                validNeighbors++;
-            }
-        }
-
-        // 计算均值
-        aggregatedCost = aggregatedCost / validNeighbors;
-    } else {
-        // 边界像素：只聚合有效邻居
-        for (int dy = -AGG_RADIUS; dy <= AGG_RADIUS; dy++) {
-            for (int dx = -AGG_RADIUS; dx <= AGG_RADIUS; dx++) {
-                int neighborX = int(pixelX) + dx;
-                int neighborY = int(pixelY) + dy;
-
-                // 检查邻居是否在图像内
-                if (neighborX >= 0 && neighborX < int(IMAGE_WIDTH) &&
-                    neighborY >= 0 && neighborY < int(IMAGE_HEIGHT)) {
-
-                    uint neighborCost = getInputCost(uint(neighborX), uint(neighborY), disparity);
-                    aggregatedCost += neighborCost;
-                    validNeighbors++;
-                }
-            }
-        }
-
-        // 计算均值（如果至少有一个有效邻居）
-        if (validNeighbors > 0u) {
-            aggregatedCost = aggregatedCost / validNeighbors;
-        } else {
-            // 没有有效邻居，使用原始代价
-            aggregatedCost = getInputCost(pixelX, pixelY, disparity);
+    uint x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y, d = gl_GlobalInvocationID.z;
+    if (x >= params.imageWidth || y >= params.imageHeight || d >= params.maxDisparity) return;
+    uint pixelIdx = y * params.imageWidth + x;
+    uint volIdx = pixelIdx * params.maxDisparity + d;
+    uint sum = 0u, count = 0u;
+    for (int dy = -int(AGG_RADIUS); dy <= int(AGG_RADIUS); ++dy) {
+        int ny = int(y) + dy;
+        if (ny < 0 || ny >= int(params.imageHeight)) continue;
+        for (int dx = -int(AGG_RADIUS); dx <= int(AGG_RADIUS); ++dx) {
+            int nx = int(x) + dx;
+            if (nx < 0 || nx >= int(params.imageWidth)) continue;
+            uint nIdx = uint(ny) * params.imageWidth + uint(nx);
+            uint nVolIdx = nIdx * params.maxDisparity + d;
+            sum += inCost.cost[nVolIdx];
+            count++;
         }
     }
-
-    // 写入聚合后的代价
-    aggregatedCostBuffer.data[outputIndex] = aggregatedCost;
-
-    // 第一个视差的第一个像素记录调试信息
-    if (pixelIndex == 0u && disparity == 0u) {
-        // 验证编译时常量与Uniform值的一致性
-        bool configValid = true;
-
-        if (IMAGE_WIDTH != params.imageWidth ||
-            IMAGE_HEIGHT != params.imageHeight ||
-            MAX_DISPARITY != params.maxDisparity) {
-            configValid = false;
-        }
-
-        // 获取一些代价用于调试
-        uint originalCost = getInputCost(0u, 0u, 0u);
-        uint aggregatedCostDebug = aggregatedCost;
-
-        // 记录调试信息
-        debugBuffer.info[0u] = params.imageWidth;
-        debugBuffer.info[1u] = params.imageHeight;
-        debugBuffer.info[2u] = params.maxDisparity;
-        debugBuffer.info[3u] = isBoundaryPixel ? 1u : 0u;
-        debugBuffer.info[4u] = validNeighbors;
-        debugBuffer.info[5u] = originalCost;
-        debugBuffer.info[6u] = aggregatedCostDebug;
-        debugBuffer.info[7u] = configValid ? 1u : 0u;
-
-        // 在输出缓冲区的前几个位置记录调试信息
-        aggregatedCostBuffer.data[0] = originalCost;        // 原始代价
-        aggregatedCostBuffer.data[1] = aggregatedCostDebug; // 聚合后的代价
-        aggregatedCostBuffer.data[2] = validNeighbors;      // 有效邻居数
+    uint aggregated = (count > 0) ? (sum / count) : inCost.cost[volIdx];
+    outCost.cost[volIdx] = aggregated;
+    if (x == 0 && y == 0 && d == 0) {
+        debug.data[0] = inCost.cost[0];
+        debug.data[1] = aggregated;
+        debug.data[2] = AGGREGATION_WINDOW;
+        debug.data[3] = count;
     }
 }

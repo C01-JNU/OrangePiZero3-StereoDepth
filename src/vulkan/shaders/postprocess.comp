@@ -1,169 +1,73 @@
 #version 450
-// 后处理着色器（修复版）
-// 功能：对视差图进行后处理，包括一致性检查、中值滤波、填充等
-// 输入：初步视差图 (压缩后宽度×压缩后高度)
-// 输出：最终视差图 (压缩后宽度×压缩后高度)
-// 最后更新: 2026年2月8日
-// 作者: C01-JNU
-
-// 编译时插入的参数宏（由merge_shader.py自动插入）
-layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y, local_size_z = 1) in;
-
-// Uniform缓冲区（必须与C++端的PipelineParams完全匹配）
+layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y) in;
 layout(std140, binding = 0) uniform Parameters {
-    uint imageWidth;        // 偏移: 0 (C++端: compressedImageWidth)
-    uint imageHeight;       // 偏移: 4 (C++端: compressedImageHeight)
-    uint maxDisparity;      // 偏移: 8
-    uint windowSize;        // 偏移: 12
-
-    float uniquenessRatio;  // 偏移: 16
-    float penaltyP1;        // 偏移: 20
-    float penaltyP2;        // 偏移: 24
-    uint flags;             // 偏移: 28
-
-    uint speckleWindow;     // 偏移: 32
-    uint speckleRange;      // 偏移: 36
-    uint medianSize;        // 偏移: 40
-    uint padding[3];        // 偏移: 44, 48, 52
+    uint imageWidth, imageHeight, maxDisparity, windowSize;
+    float uniquenessRatio, penaltyP1, penaltyP2;
+    uint flags, speckleWindow, speckleRange, medianSize, padding[3];
 } params;
-
-// 输入缓冲区：初步视差图 (压缩后宽度×压缩后高度)
-layout(binding = 0) readonly buffer InputDisparityBuffer {
-    uint data[];
-} inputDisparityBuffer;
-
-// 输出缓冲区：最终视差图 (压缩后宽度×压缩后高度)
-layout(binding = 1) writeonly buffer OutputDisparityBuffer {
-    uint data[];
-} outputDisparityBuffer;
-
-// 临时缓冲区：用于中间计算
-layout(binding = 2) readonly buffer TempBuffer {
-    uint data[];
-} tempBuffer;
-
-// 调试缓冲区
-layout(binding = 3) writeonly buffer DebugBuffer {
-    uint info[8];
-} debugBuffer;
-
-// 使用编译时常量定义数组大小（GLSL要求编译时常量）
-#define MEDIAN_RADIUS ((MEDIAN_SIZE - 1) / 2)  // 对于3×3中值滤波，MEDIAN_RADIUS=1
-#define MAX_MEDIAN_NEIGHBORS ((MEDIAN_SIZE) * (MEDIAN_SIZE)) // 最多9个邻居
-
-// 辅助函数：获取输入视差值
-uint getInputDisparity(uint x, uint y) {
-    if (x >= IMAGE_WIDTH || y >= IMAGE_HEIGHT) {
-        return MAX_DISPARITY; // 返回无效视差
-    }
-
-    uint pixelIndex = y * IMAGE_WIDTH + x;
-    return inputDisparityBuffer.data[pixelIndex];
-}
-
-// 辅助函数：中值滤波
+layout(binding = 1) readonly buffer InputDisparity { uint disp[]; } inDisp;
+layout(binding = 3) writeonly buffer OutputDisparity { uint disp[]; } outDisp;
+layout(binding = 5) writeonly buffer Debug { uint data[]; } debug;
+#define MEDIAN_RADIUS ((MEDIAN_SIZE - 1) / 2)
+#define SPECKLE_RADIUS 1
 uint medianFilter(uint x, uint y) {
-    uint disparities[MAX_MEDIAN_NEIGHBORS];
+    uint values[MEDIAN_SIZE * MEDIAN_SIZE];
     uint count = 0u;
-
-    // 收集邻居视差
-    for (int dy = -MEDIAN_RADIUS; dy <= MEDIAN_RADIUS; dy++) {
-        for (int dx = -MEDIAN_RADIUS; dx <= MEDIAN_RADIUS; dx++) {
+    for (int dy = -int(MEDIAN_RADIUS); dy <= int(MEDIAN_RADIUS); ++dy) {
+        int ny = int(y) + dy;
+        if (ny < 0 || ny >= int(params.imageHeight)) continue;
+        for (int dx = -int(MEDIAN_RADIUS); dx <= int(MEDIAN_RADIUS); ++dx) {
             int nx = int(x) + dx;
-            int ny = int(y) + dy;
-
-            if (nx >= 0 && nx < int(IMAGE_WIDTH) &&
-                ny >= 0 && ny < int(IMAGE_HEIGHT)) {
-                uint d = getInputDisparity(uint(nx), uint(ny));
-                if (d < MAX_DISPARITY) {
-                    disparities[count++] = d;
-                }
+            if (nx < 0 || nx >= int(params.imageWidth)) continue;
+            uint idx = uint(ny) * params.imageWidth + uint(nx);
+            uint d = inDisp.disp[idx];
+            if (d < params.maxDisparity) {
+                values[count++] = d;
             }
         }
     }
-
-    // 如果没有有效视差，返回无效
-    if (count == 0u) return MAX_DISPARITY;
-
-    // 简单冒泡排序求中值
-    for (uint i = 0u; i < count - 1u; i++) {
-        for (uint j = 0u; j < count - i - 1u; j++) {
-            if (disparities[j] > disparities[j + 1u]) {
-                uint temp = disparities[j];
-                disparities[j] = disparities[j + 1u];
-                disparities[j + 1u] = temp;
+    if (count == 0u) return params.maxDisparity;
+    for (uint i = 0u; i < count - 1u; ++i)
+        for (uint j = 0u; j < count - i - 1u; ++j)
+            if (values[j] > values[j+1u]) {
+                uint t = values[j]; values[j] = values[j+1u]; values[j+1u] = t;
             }
-        }
-    }
-
-    return disparities[count / 2u];
+    return values[count / 2u];
 }
-
-// 辅助函数：斑点检测
-bool isSpeckle(uint x, uint y, uint disparity) {
-    // 使用编译时常量SPECKLE_RANGE进行斑点检测
-    uint similarCount = 0u;
-    uint totalCount = 0u;
-
-    // 使用3×3窗口检查（简单实现）
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
+bool isSpeckle(uint x, uint y, uint d) {
+    uint similar = 0u, total = 0u;
+    for (int dy = -SPECKLE_RADIUS; dy <= SPECKLE_RADIUS; ++dy) {
+        int ny = int(y) + dy;
+        if (ny < 0 || ny >= int(params.imageHeight)) continue;
+        for (int dx = -SPECKLE_RADIUS; dx <= SPECKLE_RADIUS; ++dx) {
             int nx = int(x) + dx;
-            int ny = int(y) + dy;
-
-            if (nx >= 0 && nx < int(IMAGE_WIDTH) &&
-                ny >= 0 && ny < int(IMAGE_HEIGHT)) {
-                totalCount++;
-                uint nd = getInputDisparity(uint(nx), uint(ny));
-
-                // 使用SPECKLE_RANGE宏作为阈值
-                if (nd < MAX_DISPARITY && abs(int(nd) - int(disparity)) <= int(SPECKLE_RANGE)) {
-                    similarCount++;
-                }
-            }
+            if (nx < 0 || nx >= int(params.imageWidth)) continue;
+            total++;
+            uint idx = uint(ny) * params.imageWidth + uint(nx);
+            uint nd = inDisp.disp[idx];
+            if (nd < params.maxDisparity && abs(int(nd) - int(d)) <= int(params.speckleRange))
+                similar++;
         }
     }
-
-    // 如果相似像素太少，认为是斑点
-    return (totalCount > 0u) && (float(similarCount) / float(totalCount) < 0.5);
+    return (total > 0u) && (float(similar) / float(total) < 0.5f);
 }
-
 void main() {
-    uint x = gl_GlobalInvocationID.x;
-    uint y = gl_GlobalInvocationID.y;
-
-    if (x >= IMAGE_WIDTH || y >= IMAGE_HEIGHT) return;
-
-    uint idx = y * IMAGE_WIDTH + x;
-    uint inputDisp = getInputDisparity(x, y);
-    uint outputDisp = inputDisp;
-
-    // 斑点过滤（如果启用）
-    if (IS_FLAG_SET(FLAG_USE_POSTPROCESSING) && inputDisp < MAX_DISPARITY) {
-        if (isSpeckle(x, y, inputDisp)) {
-            outputDisp = MAX_DISPARITY;
-        }
+    uint x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y;
+    if (x >= params.imageWidth || y >= params.imageHeight) return;
+    uint idx = y * params.imageWidth + x;
+    uint d = inDisp.disp[idx];
+    uint outD = d;
+    if (d < params.maxDisparity) {
+        if (IS_FLAG_SET(FLAG_USE_POSTPROCESSING) && isSpeckle(x, y, d))
+            outD = params.maxDisparity;
     }
-
-    // 中值滤波（如果启用且当前像素无效）
-    if (IS_FLAG_SET(FLAG_USE_MEDIAN_FILTER) && outputDisp == MAX_DISPARITY) {
+    if (IS_FLAG_SET(FLAG_USE_MEDIAN_FILTER) && outD == params.maxDisparity) {
         uint filtered = medianFilter(x, y);
-        if (filtered < MAX_DISPARITY) {
-            outputDisp = filtered;
-        }
+        if (filtered < params.maxDisparity) outD = filtered;
     }
-
-    outputDisparityBuffer.data[idx] = outputDisp;
-
-    // 调试信息
-    if (idx == 0u) {
-        debugBuffer.info[0u] = params.imageWidth;
-        debugBuffer.info[1u] = params.imageHeight;
-        debugBuffer.info[2u] = params.maxDisparity;
-        debugBuffer.info[3u] = MEDIAN_SIZE;
-        debugBuffer.info[4u] = SPECKLE_RANGE;
-        debugBuffer.info[5u] = inputDisp;
-        debugBuffer.info[6u] = outputDisp;
-        debugBuffer.info[7u] = IS_FLAG_SET(FLAG_USE_MEDIAN_FILTER) ? 1u : 0u;
+    outDisp.disp[idx] = outD;
+    if (x == 0 && y == 0) {
+        debug.data[0] = d; debug.data[1] = outD;
+        debug.data[2] = MEDIAN_SIZE; debug.data[3] = params.speckleRange;
     }
 }

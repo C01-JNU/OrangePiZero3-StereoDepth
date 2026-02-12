@@ -1,204 +1,91 @@
 #version 450
-// Census变换计算着色器（双输出版本）
-// 功能：同时生成左右眼图像的64位Census描述符
-// 算法：使用9×9窗口，取前64个邻居，比较规则：neighbor > center ? 1 : 0
-// 最后更新: 2026年2月8日
-// 作者: C01-JNU
-// 修改：添加右眼输出，一次调度处理双眼
-
-// 编译时插入的参数宏（由merge_shader.py自动插入）
-layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y, local_size_z = 1) in;
-
-// Uniform缓冲区（必须与C++端的PipelineParams完全匹配）
+layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y) in;
 layout(std140, binding = 0) uniform Parameters {
-    uint imageWidth;        // 偏移: 0 (C++端: compressedImageWidth)
-    uint imageHeight;       // 偏移: 4 (C++端: compressedImageHeight)
-    uint maxDisparity;      // 偏移: 8
-    uint windowSize;        // 偏移: 12
-
-    float uniquenessRatio;  // 偏移: 16
-    float penaltyP1;        // 偏移: 20
-    float penaltyP2;        // 偏移: 24
-    uint flags;             // 偏移: 28
-
-    uint speckleWindow;     // 偏移: 32
-    uint speckleRange;      // 偏移: 36
-    uint medianSize;        // 偏移: 40
-    uint padding[3];        // 偏移: 44, 48, 52
+    uint imageWidth, imageHeight, maxDisparity, windowSize;
+    float uniquenessRatio, penaltyP1, penaltyP2;
+    uint flags, speckleWindow, speckleRange, medianSize, padding[3];
 } params;
+layout(binding = 1) readonly buffer LeftImage { uint pixels[]; } leftImg;
+layout(binding = 2) readonly buffer RightImage { uint pixels[]; } rightImg;
+layout(binding = 3) writeonly buffer LeftCensus { uint bits[]; } leftCensus;
+layout(binding = 4) writeonly buffer RightCensus { uint bits[]; } rightCensus;
+layout(binding = 5) writeonly buffer Debug { uint data[]; } debug;
 
-// 输入缓冲区：左右拼接图像 (压缩后宽度×2 × 压缩后高度)
-// 左眼：x∈[0, IMAGE_WIDTH-1]
-// 右眼：x∈[IMAGE_WIDTH, 2×IMAGE_WIDTH-1]
-// 使用uint存储8位灰度值（0-255）
-layout(binding = 1) readonly buffer InputBuffer {
-    uint data[];
-} inputBuffer;
+// 半径定义为 int 常量表达式（关键修复）
+#define RADIUS int((WINDOW_SIZE - 1) / 2)
 
-// 输出缓冲区：左眼Census描述符 (IMAGE_WIDTH×IMAGE_HEIGHT × 2个uint)
-// 每个像素的64位描述符存储为2个连续的uint：
-// [pixel0_low, pixel0_high, pixel1_low, pixel1_high, ...]
-layout(binding = 2) writeonly buffer LeftCensusBuffer {
-    uint data[];
-} leftCensusBuffer;
-
-// 输出缓冲区：右眼Census描述符 (IMAGE_WIDTH×IMAGE_HEIGHT × 2个uint) - 新增！
-layout(binding = 3) writeonly buffer RightCensusBuffer {
-    uint data[];
-} rightCensusBuffer;
-
-// 调试缓冲区：用于验证和调试信息
-layout(binding = 4) writeonly buffer DebugBuffer {
-    uint info[8];
-} debugBuffer;
-
-// 常量定义（基于WINDOW_SIZE宏，将在编译时插入）
-#define RADIUS ((WINDOW_SIZE - 1) / 2)           // 窗口半径（对于9×9窗口，RADIUS=4）
-#define NUM_NEIGHBORS (WINDOW_SIZE * WINDOW_SIZE - 1)  // 总邻居数（80）
-#define BITS_PER_PIXEL 64                             // 每个像素的描述符位数
-#define STITCHED_WIDTH (IMAGE_WIDTH * 2)              // 拼接图像总宽度
-
-// 辅助函数：获取拼接图像中的像素值
-uint getPixelValue(uint x, uint y) {
-    // x是拼接图像的x坐标（0 到 STITCHED_WIDTH-1）
-    // y是图像的y坐标（0 到 IMAGE_HEIGHT-1）
-    uint index = y * STITCHED_WIDTH + x;
-    return inputBuffer.data[index];
-}
-
-// 辅助函数：获取左眼图像中的像素值（x∈[0, IMAGE_WIDTH-1]）
-uint getLeftPixelValue(uint leftX, uint leftY) {
-    // 左眼图像在拼接图像的前半部分
-    return getPixelValue(leftX, leftY);
-}
-
-// 辅助函数：获取右眼图像中的像素值（x∈[IMAGE_WIDTH, 2×IMAGE_WIDTH-1]）
-uint getRightPixelValue(uint leftX, uint leftY) {
-    // 右眼图像在拼接图像的后半部分，x坐标偏移IMAGE_WIDTH
-    uint rightX = leftX + IMAGE_WIDTH;
-    return getPixelValue(rightX, leftY);
-}
-
-// 辅助函数：计算单个像素的Census描述符
-void computeCensusDescriptor(uint centerX, uint centerY,
-                            uint centerValue, bool isLeftEye,
-                            out uint descLow, out uint descHigh) {
-    descLow = 0u;
-    descHigh = 0u;
-    int bitIndex = 0;  // 当前处理的位索引（0-63）
-
-    for (int dy = -RADIUS; dy <= RADIUS; dy++) {
-        for (int dx = -RADIUS; dx <= RADIUS; dx++) {
-            // 跳过中心点
-            if (dx == 0 && dy == 0) {
-                continue;
-            }
-
-            // 只取前64个邻居
-            if (bitIndex >= int(BITS_PER_PIXEL)) {
-                break;
-            }
-
-            // 计算邻居像素在图像中的坐标
-            int neighborX = int(centerX) + dx;
-            int neighborY = int(centerY) + dy;
-
-            // 检查邻居是否在图像边界内
-            if (neighborX >= 0 && neighborX < int(IMAGE_WIDTH) &&
-                neighborY >= 0 && neighborY < int(IMAGE_HEIGHT)) {
-
-                // 获取邻居像素值（根据左右眼选择不同的函数）
-                uint neighborValue;
-                if (isLeftEye) {
-                    neighborValue = getLeftPixelValue(uint(neighborX), uint(neighborY));
-                } else {
-                    neighborValue = getRightPixelValue(uint(neighborX), uint(neighborY));
-                }
-
-                // Census比较：neighbor > center ? 1 : 0
-                if (neighborValue > centerValue) {
-                    // 设置对应的位
-                    if (bitIndex < 32) {
-                        // 低32位
-                        descLow |= (1u << uint(bitIndex));
-                    } else {
-                        // 高32位（位索引32-63）
-                        descHigh |= (1u << uint(bitIndex - 32));
-                    }
-                }
-            }
-
-            bitIndex++;
-        }
-    }
-}
+shared uint tileLeft[WORKGROUP_X + 2 * RADIUS][WORKGROUP_Y + 2 * RADIUS];
+shared uint tileRight[WORKGROUP_X + 2 * RADIUS][WORKGROUP_Y + 2 * RADIUS];
 
 void main() {
-    // 获取当前像素在左右眼图像中的位置（基于压缩后尺寸）
-    uint leftX = gl_GlobalInvocationID.x;
-    uint leftY = gl_GlobalInvocationID.y;
+    int gx = int(gl_GlobalInvocationID.x);
+    int gy = int(gl_GlobalInvocationID.y);
+    int imgW = int(params.imageWidth);
+    int imgH = int(params.imageHeight);
+    if (gx >= imgW || gy >= imgH) return;
 
-    // 边界检查（使用编译时常量）
-    if (leftX >= IMAGE_WIDTH || leftY >= IMAGE_HEIGHT) {
-        return;
+    int lx = int(gl_LocalInvocationID.x);
+    int ly = int(gl_LocalInvocationID.y);
+    int wgx = int(gl_WorkGroupID.x);
+    int wgy = int(gl_WorkGroupID.y);
+    int wgSizeX = int(WORKGROUP_X);
+    int wgSizeY = int(WORKGROUP_Y);
+    int radius = RADIUS;   // 现在 RADIUS 已经是 int，赋值安全
+    int baseX = wgx * wgSizeX;
+    int baseY = wgy * wgSizeY;
+
+    // 协作加载带 halo 的图像块到共享内存
+    for (int dy = -radius; dy <= radius; dy += wgSizeY) {
+        for (int dx = -radius; dx <= radius; dx += wgSizeX) {
+            int loadX = baseX + lx + dx;
+            int loadY = baseY + ly + dy;
+            if (loadX >= 0 && loadX < imgW && loadY >= 0 && loadY < imgH) {
+                uint idx = uint(loadY) * params.imageWidth + uint(loadX);
+                tileLeft[lx + radius + dx][ly + radius + dy] = leftImg.pixels[idx];
+                tileRight[lx + radius + dx][ly + radius + dy] = rightImg.pixels[idx];
+            } else {
+                tileLeft[lx + radius + dx][ly + radius + dy] = 0u;
+                tileRight[lx + radius + dx][ly + radius + dy] = 0u;
+            }
+        }
+    }
+    barrier();
+
+    uint centerLeft  = tileLeft[lx + radius][ly + radius];
+    uint centerRight = tileRight[lx + radius][ly + radius];
+
+    uint bitsLowLeft = 0, bitsHighLeft = 0, bitsLowRight = 0, bitsHighRight = 0;
+    int bitIdx = 0;
+    for (int dy = -radius; dy <= radius; ++dy) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            uint neighborLeft  = tileLeft[lx + radius + dx][ly + radius + dy];
+            uint neighborRight = tileRight[lx + radius + dx][ly + radius + dy];
+            if (bitIdx < 32) {
+                if (neighborLeft  > centerLeft)  bitsLowLeft  |= 1u << bitIdx;
+                if (neighborRight > centerRight) bitsLowRight |= 1u << bitIdx;
+            } else {
+                if (neighborLeft  > centerLeft)  bitsHighLeft  |= 1u << (bitIdx - 32);
+                if (neighborRight > centerRight) bitsHighRight |= 1u << (bitIdx - 32);
+            }
+            ++bitIdx;
+        }
     }
 
-    // 计算像素索引（在单眼图像中）
-    uint pixelIndex = (leftY * IMAGE_WIDTH) + leftX;
+    uint idx = uint(gy) * params.imageWidth + uint(gx);
+    leftCensus.bits[idx * 2u]     = bitsLowLeft;
+    leftCensus.bits[idx * 2u + 1u] = bitsHighLeft;
+    rightCensus.bits[idx * 2u]     = bitsLowRight;
+    rightCensus.bits[idx * 2u + 1u] = bitsHighRight;
 
-    // 计算输出缓冲区中的起始位置（每个像素占2个uint）
-    uint outputBaseIndex = pixelIndex * 2;
-
-    // 获取左右眼的中心像素值
-    uint leftCenterValue = getLeftPixelValue(leftX, leftY);
-    uint rightCenterValue = getRightPixelValue(leftX, leftY);
-
-    // 计算左右眼的Census描述符
-    uint leftDescLow, leftDescHigh;
-    uint rightDescLow, rightDescHigh;
-    
-    computeCensusDescriptor(leftX, leftY, leftCenterValue, true, leftDescLow, leftDescHigh);
-    computeCensusDescriptor(leftX, leftY, rightCenterValue, false, rightDescLow, rightDescHigh);
-
-    // 写入左眼输出缓冲区
-    leftCensusBuffer.data[outputBaseIndex] = leftDescLow;
-    leftCensusBuffer.data[outputBaseIndex + 1u] = leftDescHigh;
-
-    // 写入右眼输出缓冲区
-    rightCensusBuffer.data[outputBaseIndex] = rightDescLow;
-    rightCensusBuffer.data[outputBaseIndex + 1u] = rightDescHigh;
-
-    // 第一个像素记录调试信息
-    if (pixelIndex == 0u) {
-        // 验证编译时常量与Uniform值的一致性
-        bool configValid = true;
-
-        if (IMAGE_WIDTH != params.imageWidth ||
-            IMAGE_HEIGHT != params.imageHeight ||
-            WINDOW_SIZE != params.windowSize) {
-            configValid = false;
-        }
-
-        // 记录调试信息
-        debugBuffer.info[0u] = params.imageWidth;
-        debugBuffer.info[1u] = params.imageHeight;
-        debugBuffer.info[2u] = params.windowSize;
-        debugBuffer.info[3u] = configValid ? 1u : 0u;
-        debugBuffer.info[4u] = leftDescLow;   // 左眼描述符低32位
-        debugBuffer.info[5u] = leftDescHigh;  // 左眼描述符高32位
-        debugBuffer.info[6u] = rightDescLow;  // 右眼描述符低32位
-        debugBuffer.info[7u] = rightDescHigh; // 右眼描述符高32位
-
-        // 在左眼输出缓冲区的前几个位置也记录一些验证信息
-        leftCensusBuffer.data[0u] = params.imageWidth;
-        leftCensusBuffer.data[1u] = params.imageHeight;
-        leftCensusBuffer.data[2u] = params.windowSize;
-        leftCensusBuffer.data[3u] = configValid ? 1u : 0u;
-        
-        // 在右眼输出缓冲区也记录相同信息用于验证
-        rightCensusBuffer.data[0u] = params.imageWidth;
-        rightCensusBuffer.data[1u] = params.imageHeight;
-        rightCensusBuffer.data[2u] = params.windowSize;
-        rightCensusBuffer.data[3u] = configValid ? 1u : 0u;
+    if (gx == 0 && gy == 0) {
+        debug.data[0] = bitsLowLeft;
+        debug.data[1] = bitsHighLeft;
+        debug.data[2] = bitsLowRight;
+        debug.data[3] = bitsHighRight;
+        debug.data[4] = params.imageWidth;
+        debug.data[5] = params.imageHeight;
+        debug.data[6] = params.windowSize;
+        debug.data[7] = uint(radius);
     }
 }

@@ -1,368 +1,429 @@
 # OrangePiZero3-StereoDepth 项目代码规范
-# 最后更新：2026年1月17日
-# 作者：C01-JNU
+**最后更新**：2026年2月12日  
+**适用版本**：重构完成后全线代码  
+**维护者**：C01-JNU & AI助手  
+
+---
+
+## 0. 总则
+1. **可读性优先**：代码是写给人看的，顺便给机器执行。
+2. **配置驱动**：所有可变参数必须来自`config/global_config.yaml`，禁止硬编码。
+3. **无C++异常**：完全禁用`try/catch/throw`，错误通过返回值/错误码传递。
+4. **Vulkan C API**：禁止使用`vulkan.hpp`，一律使用`vulkan.h`。
+5. **命名空间扁平化**：使用`namespace stereo_depth::vulkan`、`namespace stereo_depth::utils`等，禁止嵌套花括号。
+6. **C++17标准**：项目强制`-std=c++17`。
+
+---
 
 ## 1. 命名规范
 
 ### 1.1 文件命名
-- 头文件：使用小写字母，单词间用下划线分隔，例如：vulkan_pipeline.h
-- 源文件：同上，例如：stereo_matching.cpp
-- 类文件：类名与文件名保持一致，例如：CameraDriver 类对应 camera_driver.h
+- **头文件/源文件**：全小写，单词间用下划线分隔。  
+  ✅ `vulkan_context.h`、`stereo_pipeline.cpp`  
+  ❌ `VulkanContext.h`、`stereoPipeline.cpp`
+- **类定义文件**：类名与文件名保持映射关系。  
+  类`CameraDriver` → `camera_driver.h` / `camera_driver.cpp`
 
 ### 1.2 函数命名
-- 使用小驼峰命名法，例如：calculateDisparity(), initVulkanDevice()
-- 布尔函数以 is、has、can、should 开头，例如：isCameraConnected()
+- **普通函数/成员函数**：小驼峰。  
+  ✅ `calculateDisparity()`、`initVulkanDevice()`  
+- **布尔返回函数**：以`is`、`has`、`can`、`should`开头。  
+  ✅ `isCameraConnected()`、`hasInitialized()`
+- **私有成员函数**：同样使用小驼峰，无特殊前缀。
 
 ### 1.3 变量命名
-- 局部变量：小驼峰命名法，例如：imageWidth
-- 成员变量：前缀 m_ + 小驼峰，例如：m_deviceHandle
-- 静态变量：前缀 s_ + 小驼峰，例如：s_instanceCount
-- 常量：全大写，下划线分隔，例如：MAX_DISPARITY
+- **局部变量**：小驼峰。  
+  ✅ `imageWidth`、`pixelIndex`
+- **成员变量**：前缀`m_` + 小驼峰。  
+  ✅ `m_deviceHandle`、`m_leftCpu`
+- **静态变量**：前缀`s_` + 小驼峰。  
+  ✅ `s_instanceCount`
+- **全局常量**：全大写，下划线分隔。  
+  ✅ `MAX_DISPARITY`、`WORKGROUP_X`
+- **宏**：全大写，下划线分隔。  
+  ✅ `CHECK(expr, msg)`、`IS_VALID_PIXEL(x,y)`
 
-### 1.4 类命名
-- 使用大驼峰命名法，例如：StereoMatcher, CameraCalibrator
+### 1.4 类型命名（类/结构体/枚举）
+- **类/结构体**：大驼峰。  
+  ✅ `StereoMatcher`、`VulkanContext`
+- **枚举类型**：大驼峰，枚举值全大写。  
+  ```cpp
+  enum class LogLevel {
+      TRACE,
+      DEBUG,
+      INFO,
+      WARN,
+      ERROR
+  };
+  ```
+- **枚举值**：全大写，下划线分隔。  
+  ✅ `FLAG_USE_CENSUS`、`SPECKLE_RANGE`
 
-### 1.5 枚举和结构体
-- 枚举类型：大驼峰，枚举值全大写
-- 结构体：大驼峰，成员变量小驼峰
+### 1.5 命名空间
+- **扁平化**：使用C++17连续作用域解析。  
+  ✅ `namespace stereo_depth::vulkan { ... }`  
+  ❌ `namespace stereo_depth { namespace vulkan { ... } }`
+- **utils**模块保留原风格（历史遗留），但新代码一律使用扁平风格。
+
+---
 
 ## 2. 代码格式
 
 ### 2.1 缩进
-- 使用 4 个空格进行缩进，禁止使用 Tab
+- **4个空格**，禁止Tab。
+- 所有层级严格对齐。
 
 ### 2.2 大括号
-- 左大括号不换行
-- 控制语句（if、for、while）必须使用大括号，即使只有一行
+- **左大括号不换行**，右大括号独占一行。
+  ```cpp
+  if (condition) {
+      // code
+  }
+  ```
+- **控制语句（if/for/while）必须使用大括号**，即使只有一行。
+  ✅ `if (valid) { return; }`  
+  ❌ `if (valid) return;`
 
-示例：
-if (condition) {
-    // code
-}
-
-### 2.3 空格使用
-- 运算符两侧加空格
-- 逗号后加空格
-- 控制语句关键词后加空格
+### 2.3 空格
+- 运算符两侧加空格。  
+  ✅ `a + b`、`c = d`
+- 逗号后加空格。  
+  ✅ `func(a, b, c)`
+- 控制语句关键词后加空格。  
+  ✅ `if (x)`、`for (int i = 0; i < n; ++i)`
+- 函数名与左括号间**不加空格**。  
+  ✅ `foo()`、`bar(1)`
 
 ### 2.4 行长度
-- 每行不超过 120 个字符
+- **不超过120字符**。
+- 超长时合理换行，对齐参数。
+
+### 2.5 指针与引用
+- `*`和`&`**紧贴变量名**。  
+  ✅ `uint32_t* ptr`、`const VulkanContext& ctx`  
+  ❌ `uint32_t *ptr`、`const VulkanContext &ctx`
+
+---
 
 ## 3. 头文件规范
 
 ### 3.1 包含保护
-所有头文件必须使用 #pragma once
+- **所有头文件必须使用 `#pragma once`**，禁止宏定义形式的`#ifndef`。
 
 ### 3.2 包含顺序
-1. 相关头文件（对应源文件）
-2. C 系统头文件
-3. C++ 标准库头文件
-4. 第三方库头文件
-5. 项目内头文件
+1. 本头文件对应的源文件（仅`.cpp`中）。
+2. C系统头文件（`<stdio.h>`、`<stdlib.h>`等）。
+3. C++标准库头文件（`<vector>`、`<memory>`等）。
+4. 第三方库头文件（`vulkan/vulkan.h`、`opencv2/opencv.hpp`、`yaml-cpp/yaml.h`）。
+5. 项目内头文件（`utils/logger.hpp`、`vulkan/context.hpp`）。
+
+**每组之间空一行**。
 
 ### 3.3 注释
-- 每个头文件必须有文件头注释
-- 每个函数必须有注释说明功能、参数、返回值
-- 复杂逻辑需要行内注释
+- **文件头注释**：每个头文件必须有，包含文件名、简要描述、最后更新、作者。
+  ```cpp
+  // vulkan_context.h
+  // Vulkan上下文管理，封装实例、设备、队列
+  // 最后更新: 2026-02-12
+  // 作者: C01-JNU
+  ```
+- **函数注释**：使用`/** */`风格，说明功能、参数、返回值、线程安全性（如有）。
+  ```cpp
+  /**
+   * @brief 创建立体匹配流水线
+   * @param camWidth 原始拼接图像宽度
+   * @param camHeight 原始拼接图像高度
+   * @param maxDisparity 最大视差
+   * @return 成功返回true，失败返回false
+   */
+  ```
+- **复杂逻辑行内注释**：解释“为什么”而非“是什么”。
+
+---
 
 ## 4. 错误处理
 
 ### 4.1 返回值
-- 成功返回 true 或 0
-- 失败返回 false 或错误码
+- **成功返回`true`或`0`，失败返回`false`或负错误码**。
+- Vulkan API返回`VkResult`，必须检查并使用`CHECK`宏。
+  ```cpp
+  #define CHECK(expr, msg) \
+      do { if (!(expr)) { LOG_ERROR(msg); return false; } } while(0)
+  ```
 
 ### 4.2 异常
-- 禁止使用 C++ 异常
-- 使用返回值或错误码处理错误
+- **禁止使用C++异常**（`-fno-exceptions`）。
+- 所有错误通过返回值或输出参数传递。
+
+### 4.3 Vulkan错误处理
+- 对`vkCreate*`等函数，必须检查返回值并输出详细日志。
+- 统一使用`-13`等错误码映射表（在日志中输出字符串描述）。
+
+---
 
 ## 5. 内存管理
 
-### 5.1 资源获取即初始化（RAII）
-- 所有资源管理必须使用 RAII 原则
-- 使用智能指针管理动态内存
+### 5.1 RAII原则
+- **所有资源必须封装在RAII类中**（构造函数获取，析构函数释放）。
+- Vulkan对象（`VkDevice`、`VkBuffer`等）必须由管理类（如`VulkanContext`、`BufferManager`）负责生命周期。
 
-### 5.2 Vulkan 资源
-- Vulkan 对象必须正确释放
-- 使用作用域管理 Vulkan 资源生命周期
+### 5.2 智能指针
+- 动态分配的对象优先使用`std::unique_ptr`，必要时使用`std::shared_ptr`。
+- **禁止裸`new/delete`**（除Vulkan C API强制要求外）。
+
+### 5.3 Vulkan资源
+- 所有`Vk*`句柄在创建时初始化为`VK_NULL_HANDLE`，析构时判断并销毁。
+- 使用**作用域管理**：命令池、命令缓冲区等短生命周期对象，在函数内创建并立即释放。
+
+---
 
 ## 6. 日志和调试
 
 ### 6.1 日志级别
-- ERROR: 严重错误
-- WARN: 警告信息
-- INFO: 一般信息
-- DEBUG: 调试信息
-- TRACE: 详细跟踪
+| 级别 | 说明 |
+|------|------|
+| `TRACE` | 详细跟踪，仅开发调试 |
+| `DEBUG` | 调试信息，发布版本应关闭 |
+| `INFO`  | 一般信息，如初始化完成 |
+| `WARN`  | 警告，不影响运行但需关注 |
+| `ERROR` | 严重错误，功能不可用 |
 
-### 6.2 调试输出
-- 使用统一的日志系统
-- 发布版本关闭 DEBUG 和 TRACE 输出
+### 6.2 日志宏
+- 统一使用`utils/logger.hpp`提供的宏。
+  ```cpp
+  LOG_INFO("立体匹配流水线初始化完成，层数: {}", layers);
+  LOG_ERROR("创建管线失败: {}", errorString);
+  ```
+
+### 6.3 着色器调试缓冲区
+- **每个计算着色器必须包含`binding = 5`的调试缓冲区**，至少256个`uint`。
+- 首像素（`(0,0)`）必须记录关键中间值（描述符、代价、视差）及参数验证信息。
+- 发布版本通过宏`ENABLE_DEBUG`控制是否启用（保留缓冲区但不写入）。
+
+---
 
 ## 7. 版本控制
 
-### 7.1 提交信息
-- 格式：[模块] 简短描述
-- 示例：[Vulkan] 修复着色器编译错误
+### 7.1 提交信息格式
+```
+[模块] 简短描述（不超过50字符）
+
+详细说明（可选），每行不超过72字符。
+```
+- **模块**：`Vulkan`、`Shaders`、`Config`、`Pipeline`、`CMake`、`Docs`等。
+- **示例**：  
+  `[Shaders] 重写Census变换，使用共享内存+7x7窗口`
 
 ### 7.2 分支管理
-- main: 稳定版本
-- develop: 开发分支
-- feature/*: 功能分支
-- fix/*: 修复分支
+- `main`：稳定版本，仅允许合并已测试的`develop`分支。
+- `develop`：开发主线，通过PR合并功能分支。
+- `feature/*`：功能分支，从`develop`切出。
+- `fix/*`：修复分支，用于bug修复。
 
-## 8. ROS2 特定规范
+### 7.3 文件更新原则
+- 修改着色器若涉及Uniform结构体，**必须同步更新C++端的`PipelineParams`**，并通过静态断言验证大小/偏移。
+
+---
+
+## 8. ROS2 特定规范（预留）
 
 ### 8.1 节点命名
-- 使用 snake_case 命名节点
-- 示例：stereo_depth_node
+- 使用`snake_case`。
+  ✅ `stereo_depth_node`、`camera_driver_node`
 
-### 8.2 话题和服务命名
-- 使用 snake_case
-- 示例：/camera/left_image
+### 8.2 话题/服务命名
+- 使用`snake_case`，以`/`开头。
+  ✅ `/camera/left/image_raw`、`/stereo/disparity`
+
+### 8.3 QoS配置
+- 传感器数据使用`SensorDataQoS()`，其余默认。
+
+---
 
 ## 9. 性能规范
 
 ### 9.1 实时性
-- 摄像头相关代码必须考虑实时性
-- 避免在关键路径进行动态内存分配
+- 摄像头数据处理必须在**帧周期内完成**（目标30 FPS→33ms）。
+- 关键路径**禁止动态内存分配**（`new`、`malloc`、`std::vector`扩容等）。
 
-### 9.2 资源使用
-- 关注内存占用
-- 优化 GPU 内存使用
+### 9.2 GPU优化（Mali-G31特化）
+- **工作组大小**：固定为`16×16`（`local_size_x=16, local_size_y=16`）。
+- **共享内存**：优先使用`shared`，减少全局内存访问。
+- **整数运算**：优先`uint`，避免`64位`、`浮点`（精度允许时）。
+- **分支**：减少`if-else`，使用条件赋值（`x = cond ? a : b`）。
+- **内存访问**：保证工作组内线程**连续、对齐**访问。
+
+### 9.3 CPU-GPU同步
+- 使用**暂存缓冲区（staging buffer）** + 异步传输（`VK_TRANSFER_SRC_BIT`）。
+- **禁止不必要的GPU回读**（如拼接图像在CPU缓存完成，零回读）。
+
+---
 
 ## 10. 安全规范
 
 ### 10.1 输入验证
-- 所有外部输入必须验证
-- 检查指针有效性
+- **所有外部输入（图像数据、配置文件、命令行参数）必须验证**。
+- 指针参数**必须检查`nullptr`**。
 
 ### 10.2 边界检查
-- 数组访问必须检查边界
-- 确保不越界访问
+- 着色器内**必须检查全局调用ID是否超出图像尺寸**。
+  ```glsl
+  if (gl_GlobalInvocationID.x >= params.imageWidth) return;
+  ```
+- C++端数组访问**优先使用`at()`或显式边界判断**。
 
-OrangePiZero3-StereoDepth 着色器编写规范
-最后更新：2026年2月8日
-作者：C01-JNU
-1. 文件命名
-census.comp
-cost.comp
-aggregation.comp
-wta.comp
-postprocess.comp
+### 10.3 缓冲区溢出防护
+- 所有`vkCmdCopyBuffer`操作需确保源/目标大小充足。
 
-2. 代码结构
-2.1 头部注释
-glsl
-#version 450
-// 着色器名称
-// 功能描述
-// 最后更新日期
-// 作者
-2.2 版本指令
-必须使用 #version 450（Vulkan要求的最低版本）
+---
 
-2.3 工作组大小
-glsl
-layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y, local_size_z = 1) in;
-使用配置生成的工作组大小宏
+## 11. 着色器编写规范（GLSL）
 
-z维度固定为1
+### 11.1 文件命名
+- 全小写，无后缀（编译时自动添加`.comp`）。
+  ✅ `census.comp`、`cost.comp`
 
-2.4 Uniform缓冲区
-必须使用统一的 PipelineParams 结构体
+### 11.2 版本指令
+- **强制`#version 450`**，Vulkan 1.0最低支持版本。
 
-绑定位置：binding = 0
+### 11.3 代码结构
+1. `#version`
+2. 注释（着色器名称、功能、最后更新、作者）
+3. `layout(local_size_x = WORKGROUP_X, ...) in;`
+4. Uniform参数块（binding = 0）
+5. 输入缓冲区（binding = 1, 2）
+6. 输出缓冲区（binding = 3, 4）
+7. 调试缓冲区（binding = 5）
+8. 共享内存定义（如有）
+9. `main()`函数
 
-必须使用 std140 布局
-
-结构体必须与C++端完全匹配
-
-2.5 缓冲区绑定
-输入缓冲区：binding = 1, 2, 3...
-
-输出缓冲区：binding = n, n+1...
-
-类型：readonly buffer 或 writeonly buffer
-
-3. 内存布局规则
-3.1 std140对齐规则
-标量（int, uint, float）：4字节对齐
-
-向量（vec2, vec3, vec4）：按元素大小对齐
-
-数组：每个元素按16字节对齐
-
-结构体：按最大成员对齐
-
-3.2 Uniform缓冲区结构体示例
-glsl
+### 11.4 Uniform缓冲区（56字节，std140）
+```glsl
 layout(std140, binding = 0) uniform Parameters {
-    // 第1组（16字节对齐）
-    uint param1;    // 偏移0
-    uint param2;    // 偏移4
-    uint param3;    // 偏移8
-    uint param4;    // 偏移12
-    
-    // 第2组（16字节对齐）
-    float param5;   // 偏移16
-    float param6;   // 偏移20
-    uint param7;    // 偏移24
-    uint padding;   // 偏移28（补齐）
+    uint imageWidth;        // 偏移0
+    uint imageHeight;       // 偏移4
+    uint maxDisparity;      // 偏移8
+    uint windowSize;        // 偏移12
+    float uniquenessRatio;  // 偏移16
+    float penaltyP1;        // 偏移20
+    float penaltyP2;        // 偏移24
+    uint flags;             // 偏移28
+    uint speckleWindow;     // 偏移32
+    uint speckleRange;      // 偏移36
+    uint medianSize;        // 偏移40
+    uint padding[3];        // 偏移44,48,52
 } params;
-4. 编程规范
-4.1 变量命名
-Uniform变量：params.xxx
+```
+**C++端必须与之一致，`static_assert(sizeof(PipelineParams) == 56)`**。
 
-局部变量：小驼峰命名法，例如：pixelIndex
+### 11.5 缓冲区绑定规范（固定）
+| Binding | 类型 | 用途 |
+|--------|------|------|
+| 0 | Uniform | 参数块 |
+| 1 | Storage | 输入缓冲区0（左图、左Census等） |
+| 2 | Storage | 输入缓冲区1（右图、右Census等） |
+| 3 | Storage | 输出缓冲区0（左Census、代价体、视差等） |
+| 4 | Storage | 输出缓冲区1（右Census、未使用） |
+| 5 | Storage | 调试缓冲区（≥256 uint） |
 
-常量：全大写，下划线分隔，例如：MAX_ITERATIONS
+**所有着色器必须遵守此规范**，未使用的binding可省略声明。
 
-4.2 边界检查
-必须进行边界检查：
+### 11.6 工作组大小
+- 使用编译时宏`WORKGROUP_X`、`WORKGROUP_Y`。
+- **禁止硬编码**，由配置文件生成。
 
-glsl
-if (x >= IMAGE_WIDTH || y >= IMAGE_HEIGHT) {
-    return;
-}
-4.3 使用辅助宏
-必须使用生成的辅助宏：
+### 11.7 边界处理
+- 访问全局内存前**必须检查坐标有效性**。
+- 共享内存加载时，越界像素**填充0**（黑色）。
 
-GET_PIXEL_INDEX(x, y)：获取像素索引
+### 11.8 调试输出
+- 每个着色器必须包含调试缓冲区，至少写入(0,0)像素的关键信息。
+  ```glsl
+  if (gl_GlobalInvocationID.x == 0 && gl_GlobalInvocationID.y == 0) {
+      debug.data[0] = bitsLowLeft;
+      debug.data[1] = bitsHighLeft;
+      // ...
+  }
+  ```
 
-IS_VALID_PIXEL(x, y)：检查像素有效性
+---
 
-IS_FLAG_SET(flag)：检查标志位
+## 12. 构建与配置规范
 
-4.4 错误处理
-使用调试缓冲区输出错误信息
+### 12.1 单一数据源
+- **所有可变参数必须来源于`config/global_config.yaml`**。
+- 通过`generate_shader_config.py`生成GLSL宏和C++结构体，**禁止手动定义**。
 
-第一个像素用于记录验证信息
+### 12.2 编译时参数
+- 着色器参数（图像尺寸、视差范围、工作组等）使用**宏**，在编译前插入。
+- 运行时参数（惩罚因子、标志位）通过Uniform传入。
 
-5. 性能优化
-5.1 内存访问
-使用局部变量缓存频繁访问的数据
+### 12.3 构建自动化
+- CMake必须集成：
+  1. 读取YAML获取金字塔层数
+  2. 为每层生成独立参数文件
+  3. 合并着色器 → 编译SPIR-V（`*_layerX.comp.spv`）
+  4. 生成金字塔配置头文件（`pyramid_config.hpp`）
 
-避免全局内存的随机访问
+### 12.4 路径约定
+| 内容 | 路径 |
+|------|------|
+| 着色器源码 | `src/vulkan/shaders/*.comp` |
+| 生成的参数 | `src/vulkan/generated/layerX/` |
+| SPIR-V字节码 | `src/vulkan/spv/*_layerX.comp.spv` |
+| 测试图像 | `images/test/`（可配置） |
+| 输出图像 | `images/output/`（可配置） |
 
-使用向量化操作（vec4, vec8）
+**禁止在代码中硬编码这些路径**，测试程序必须从配置读取。
 
-5.2 计算优化
-减少分支语句
+---
 
-使用整数运算代替浮点运算（如果精度允许）
+## 附：代码示例（片段）
 
-避免除法和模运算
+**stereo_pipeline.hpp**
+```cpp
+#pragma once
+#include "vulkan/context.hpp"
+#include "vulkan/buffer_manager.hpp"
+#include "vulkan/compute_pipeline.hpp"
+#include "vulkan/generated/pyramid_config.hpp"
 
-5.3 Mali-G31特定优化
-工作组大小：16x16（与硬件匹配）
+namespace stereo_depth::vulkan {
 
-避免使用64位数据类型
+class StereoPipeline {
+public:
+    explicit StereoPipeline(const VulkanContext& context);
+    ~StereoPipeline();
+    // ...
+};
 
-减少寄存器使用
+} // namespace stereo_depth::vulkan
+```
 
-6. 调试和验证
-6.1 调试缓冲区
-每个着色器应包含调试缓冲区：
-
-glsl
-layout(binding = N) writeonly buffer DebugBuffer {
-    uint info[];
-} debugBuffer;
-6.2 验证机制
-检查编译时常量与Uniform值的一致性
-
-记录关键参数用于调试
-
-输出验证结果（成功/失败）
-
-7. 构建流程
-7.1 文件位置
-源文件：src/vulkan/shaders/
-
-SPIR-V输出：src/vulkan/spv/
-
-生成参数：src/vulkan/generated/
-
-7.2 编译命令
-bash
-# 重新生成配置
-python3 tools/generate_shader_config.py config/global_config.yaml
-
-# 重新编译着色器
-cd build
-cmake .. && make shaders
-8. 错误排查
-8.1 编译错误
-检查GLSL语法
-
-验证Uniform缓冲区对齐
-
-检查绑定冲突
-
-8.2 运行时错误
-验证缓冲区大小
-
-检查工作组调度
-
-验证数据一致性
-
-8.3 性能问题
-分析内存访问模式
-
-检查工作组大小
-
-优化算法复杂度
-
-9. 示例模板
-glsl
+**census.comp**
+```glsl
 #version 450
-// [着色器名称]
-// [功能描述]
-// 最后更新: [日期]
+// Census变换着色器
+// 最后更新: 2026-02-12
 
-// 编译时插入的参数宏
-layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y, local_size_z = 1) in;
+layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y) in;
 
-// Uniform缓冲区（必须与C++端匹配）
-layout(std140, binding = 0) uniform Parameters {
-    // ... 结构体成员
-} params;
+layout(std140, binding = 0) uniform Parameters { ... } params;
+layout(binding = 1) readonly buffer LeftImage { uint pixels[]; } leftImg;
+layout(binding = 2) readonly buffer RightImage { uint pixels[]; } rightImg;
+layout(binding = 3) writeonly buffer LeftCensus { uint bits[]; } leftCensus;
+layout(binding = 4) writeonly buffer RightCensus { uint bits[]; } rightCensus;
+layout(binding = 5) writeonly buffer Debug { uint data[]; } debug;
 
-// 输入缓冲区
-layout(binding = 1) readonly buffer InputBuffer {
-    float data[];
-} inputBuffer;
-
-// 输出缓冲区  
-layout(binding = 2) writeonly buffer OutputBuffer {
-    float data[];
-} outputBuffer;
-
-// 调试缓冲区
-layout(binding = 3) writeonly buffer DebugBuffer {
-    uint info[];
-} debugBuffer;
+#define RADIUS int((WINDOW_SIZE - 1) / 2)
+shared uint tileLeft[WORKGROUP_X + 2*RADIUS][WORKGROUP_Y + 2*RADIUS];
+shared uint tileRight[WORKGROUP_X + 2*RADIUS][WORKGROUP_Y + 2*RADIUS];
 
 void main() {
-    // 边界检查
-    if (gl_GlobalInvocationID.x >= IMAGE_WIDTH || 
-        gl_GlobalInvocationID.y >= IMAGE_HEIGHT) {
-        return;
-    }
-    
-    // 计算逻辑
-    
-    // 调试信息（第一个像素）
-    if (GET_PIXEL_INDEX(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y) == 0) {
-        // 记录调试信息
-    }
+    // ...
 }
-10. 版本控制
-10.1 提交信息
-格式：[Shaders] 简短描述
-示例：[Shaders] 添加Census变换着色器
+```
 
-10.2 文件更新
-更新着色器时，必须同时更新对应的C++结构体（如果Uniform缓冲区有变化）
+---
 
-更新配置时，必须重新生成参数文件
+**规范结束**——所有新增/重构代码必须严格遵循以上规则，以保持项目长期可维护性。

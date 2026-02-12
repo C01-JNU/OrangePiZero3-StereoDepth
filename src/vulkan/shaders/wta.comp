@@ -1,142 +1,40 @@
 #version 450
-// 赢家通吃（WTA）着色器
-// 功能：选择每个像素的最小代价对应的视差，生成初步视差图
-// 输入：聚合后的代价立方体 (压缩后宽度×压缩后高度×最大视差)
-// 输出：初步视差图 (压缩后宽度×压缩后高度)，每个像素为uint16_t视差值
-// 最后更新: 2026年2月8日
-// 作者: C01-JNU
-
-// 编译时插入的参数宏（由merge_shader.py自动插入）
-layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y, local_size_z = 1) in;
-
-// Uniform缓冲区（必须与C++端的PipelineParams完全匹配）
+layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y) in;
 layout(std140, binding = 0) uniform Parameters {
-    uint imageWidth;        // 偏移: 0 (C++端: compressedImageWidth)
-    uint imageHeight;       // 偏移: 4 (C++端: compressedImageHeight)
-    uint maxDisparity;      // 偏移: 8
-    uint windowSize;        // 偏移: 12
-
-    float uniquenessRatio;  // 偏移: 16
-    float penaltyP1;        // 偏移: 20
-    float penaltyP2;        // 偏移: 24
-    uint flags;             // 偏移: 28
-
-    uint speckleWindow;     // 偏移: 32
-    uint speckleRange;      // 偏移: 36
-    uint medianSize;        // 偏移: 40
-    uint padding[3];        // 偏移: 44, 48, 52
+    uint imageWidth, imageHeight, maxDisparity, windowSize;
+    float uniquenessRatio, penaltyP1, penaltyP2;
+    uint flags, speckleWindow, speckleRange, medianSize, padding[3];
 } params;
-
-// 输入缓冲区：聚合后的代价立方体 (压缩后宽度×压缩后高度 × MAX_DISPARITY)
-// 布局：[像素0_视差0, 像素0_视差1, ..., 像素0_视差N, 像素1_视差0, ...]
-layout(binding = 0) readonly buffer AggregatedCostVolumeBuffer {
-    uint data[];
-} costBuffer;
-
-// 输出缓冲区：初步视差图 (压缩后宽度×压缩后高度)
-// 每个像素为uint16_t视差值（0-MAX_DISPARITY-1）
-layout(binding = 1) writeonly buffer DisparityBuffer {
-    uint data[];
-} disparityBuffer;
-
-// 调试缓冲区：用于验证和调试信息
-layout(binding = 2) writeonly buffer DebugBuffer {
-    uint info[8];
-} debugBuffer;
-
-// 辅助函数：获取指定像素在指定视差下的代价
-uint getCost(uint x, uint y, uint disparity) {
-    if (x >= IMAGE_WIDTH || y >= IMAGE_HEIGHT || disparity >= MAX_DISPARITY) {
-        return 64u; // 返回最大代价
-    }
-
-    uint pixelIndex = y * IMAGE_WIDTH + x;
-    uint costIndex = pixelIndex * MAX_DISPARITY + disparity;
-    return costBuffer.data[costIndex];
-}
-
+layout(binding = 1) readonly buffer CostVolume { uint cost[]; } costVol;
+layout(binding = 3) writeonly buffer Disparity { uint disp[]; } disparity;
+layout(binding = 5) writeonly buffer Debug { uint data[]; } debug;
 void main() {
-    // 获取当前像素位置
-    uint pixelX = gl_GlobalInvocationID.x;
-    uint pixelY = gl_GlobalInvocationID.y;
-
-    // 边界检查（使用编译时常量）
-    if (pixelX >= IMAGE_WIDTH || pixelY >= IMAGE_HEIGHT) {
-        return;
-    }
-
-    // 计算像素索引
-    uint pixelIndex = pixelY * IMAGE_WIDTH + pixelX;
-
-    // 寻找最小代价对应的视差
-    uint minCost = 64u;  // 最大可能代价（64位汉明距离）
-    uint bestDisparity = 0u;
-    uint secondMinCost = 64u;
-    uint secondBestDisparity = 0u;
-
-    // 遍历所有视差
-    for (uint d = 0u; d < MAX_DISPARITY; d++) {
-        uint cost = getCost(pixelX, pixelY, d);
-
-        if (cost < minCost) {
-            // 更新第二小值
-            secondMinCost = minCost;
-            secondBestDisparity = bestDisparity;
-
-            // 更新最小值
-            minCost = cost;
-            bestDisparity = d;
-        } else if (cost < secondMinCost) {
-            // 更新第二小值
-            secondMinCost = cost;
-            secondBestDisparity = d;
+    uint x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y;
+    if (x >= params.imageWidth || y >= params.imageHeight) return;
+    uint pixelIdx = y * params.imageWidth + x;
+    uint baseIdx = pixelIdx * params.maxDisparity;
+    uint bestDisp = 0u, bestCost = 64u, secondCost = 64u;
+    for (uint d = 0u; d < params.maxDisparity; ++d) {
+        uint c = costVol.cost[baseIdx + d];
+        if (c < bestCost) {
+            secondCost = bestCost;
+            bestCost = c;
+            bestDisp = d;
+        } else if (c < secondCost) {
+            secondCost = c;
         }
     }
-
-    // 唯一性检查（可选）
-    // 如果第二小代价与最小代价太接近，认为匹配不可靠
-    bool isUnique = true;
-    if (minCost < 64u) { // 避免除以零
-        float ratio = float(secondMinCost) / float(minCost);
-        if (ratio < (1.0 + params.uniquenessRatio)) {
-            isUnique = false;
+    uint outDisp = params.maxDisparity;
+    if (bestCost < 64u) {
+        float ratio = float(secondCost) / float(bestCost);
+        if (ratio >= (1.0 + params.uniquenessRatio)) {
+            outDisp = bestDisp;
         }
     }
-
-    // 如果不唯一，标记为无效视差（MAX_DISPARITY）
-    uint finalDisparity = isUnique ? bestDisparity : MAX_DISPARITY;
-
-    // 写入视差图
-    disparityBuffer.data[pixelIndex] = finalDisparity;
-
-    // 第一个像素记录调试信息
-    if (pixelIndex == 0u) {
-        // 验证编译时常量与Uniform值的一致性
-        bool configValid = true;
-
-        if (IMAGE_WIDTH != params.imageWidth ||
-            IMAGE_HEIGHT != params.imageHeight ||
-            MAX_DISPARITY != params.maxDisparity ||
-            abs(UNIQUENESS_RATIO - params.uniquenessRatio) > 0.001) {
-            configValid = false;
-        }
-
-        // 记录调试信息
-        debugBuffer.info[0u] = params.imageWidth;
-        debugBuffer.info[1u] = params.imageHeight;
-        debugBuffer.info[2u] = params.maxDisparity;
-        debugBuffer.info[3u] = bestDisparity;
-        debugBuffer.info[4u] = minCost;
-        debugBuffer.info[5u] = secondBestDisparity;
-        debugBuffer.info[6u] = secondMinCost;
-        debugBuffer.info[7u] = isUnique ? 1u : 0u;
-
-        // 在视差缓冲区的前几个位置记录调试信息
-        disparityBuffer.data[0] = bestDisparity;      // 最佳视差
-        disparityBuffer.data[1] = minCost;           // 最小代价
-        disparityBuffer.data[2] = secondBestDisparity; // 第二佳视差
-        disparityBuffer.data[3] = secondMinCost;     // 第二小代价
-        disparityBuffer.data[4] = isUnique ? 1u : 0u; // 是否唯一
-        disparityBuffer.data[5] = uint(params.uniquenessRatio * 100.0); // 唯一性比率百分比
+    disparity.disp[pixelIdx] = outDisp;
+    if (x == 0 && y == 0) {
+        debug.data[0] = bestDisp; debug.data[1] = bestCost;
+        debug.data[2] = secondCost; debug.data[3] = outDisp;
+        debug.data[4] = uint(params.uniquenessRatio * 100.0);
     }
 }
