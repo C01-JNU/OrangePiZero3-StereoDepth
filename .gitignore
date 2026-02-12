@@ -20,7 +20,7 @@ lib/
 logs/
 src/vulkan/spv/*
 src/vulkan/generated/*
-tools/__pycache__/*
+tools/__pycache__
 
 # 图像文件（使用通配符匹配所有图像格式）
 images/**/*.png
