@@ -19,9 +19,9 @@ message(STATUS "ENABLE_GPU: ${ENABLE_GPU}")
 message(STATUS "ENABLE_CPU: ${ENABLE_CPU}")
 
 # ============================================================================
-# 查找依赖（全局需要）
+# 查找依赖
 # ============================================================================
-find_package(Vulkan REQUIRED)      # 即使不编译GPU，着色器工具也需要
+find_package(Vulkan REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(yaml-cpp REQUIRED)
@@ -33,16 +33,13 @@ find_package(Threads REQUIRED)
 include_directories(${PROJECT_SOURCE_DIR}/src)
 
 # ============================================================================
-# 通用工具模块（无论CPU/GPU都需要）
+# 通用工具模块
 # ============================================================================
 set(UTILS_SOURCES
     src/utils/config.cpp
     src/utils/logger.cpp
 )
 
-# ============================================================================
-# 主程序源文件（独立于GPU/CPU）
-# ============================================================================
 set(MAIN_SOURCES src/main.cpp)
 set(TEST_SOURCES src/test.cpp)
 
@@ -57,7 +54,6 @@ if(ENABLE_CPU)
     add_subdirectory(src/cpu_stereo)
 endif()
 
-# 标定模块（始终编译）
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/calibration/CMakeLists.txt)
     add_subdirectory(src/calibration)
 endif()
@@ -67,21 +63,24 @@ endif()
 # ============================================================================
 add_executable(stereo_depth ${MAIN_SOURCES} ${UTILS_SOURCES})
 
-target_link_libraries(stereo_depth
+target_compile_definitions(stereo_depth PRIVATE
+    ENABLE_GPU=$<BOOL:${ENABLE_GPU}>
+    ENABLE_CPU=$<BOOL:${ENABLE_CPU}>
+)
+
+target_link_libraries(stereo_depth PRIVATE
     ${OpenCV_LIBS}
     spdlog::spdlog_header_only
     yaml-cpp
     Threads::Threads
 )
 
-# 链接 GPU 库（如果启用）
 if(ENABLE_GPU AND TARGET vulkan_stereo)
-    target_link_libraries(stereo_depth vulkan_stereo)
+    target_link_libraries(stereo_depth PRIVATE vulkan_stereo)
 endif()
 
-# 链接 CPU 库（如果启用）
 if(ENABLE_CPU AND TARGET cpu_stereo)
-    target_link_libraries(stereo_depth cpu_stereo)
+    target_link_libraries(stereo_depth PRIVATE cpu_stereo)
 endif()
 
 set_target_properties(stereo_depth PROPERTIES
@@ -94,7 +93,12 @@ set_target_properties(stereo_depth PROPERTIES
 # ============================================================================
 add_executable(stereo_depth_test ${TEST_SOURCES} ${UTILS_SOURCES})
 
-target_link_libraries(stereo_depth_test
+target_compile_definitions(stereo_depth_test PRIVATE
+    ENABLE_GPU=$<BOOL:${ENABLE_GPU}>
+    ENABLE_CPU=$<BOOL:${ENABLE_CPU}>
+)
+
+target_link_libraries(stereo_depth_test PRIVATE
     ${OpenCV_LIBS}
     spdlog::spdlog_header_only
     yaml-cpp
@@ -102,11 +106,11 @@ target_link_libraries(stereo_depth_test
 )
 
 if(ENABLE_GPU AND TARGET vulkan_stereo)
-    target_link_libraries(stereo_depth_test vulkan_stereo)
+    target_link_libraries(stereo_depth_test PRIVATE vulkan_stereo)
 endif()
 
 if(ENABLE_CPU AND TARGET cpu_stereo)
-    target_link_libraries(stereo_depth_test cpu_stereo)
+    target_link_libraries(stereo_depth_test PRIVATE cpu_stereo)
 endif()
 
 set_target_properties(stereo_depth_test PROPERTIES
@@ -207,7 +211,6 @@ print(cfg.get('pyramid', {}).get('levels', 1))"
     add_custom_target(compile_shaders ALL DEPENDS ${ALL_SPV_FILES})
     add_dependencies(compile_shaders generate_shader_params)
 
-    # 使可执行文件依赖于着色器编译
     if(TARGET stereo_depth)
         add_dependencies(stereo_depth compile_shaders)
     endif()
@@ -217,7 +220,7 @@ print(cfg.get('pyramid', {}).get('levels', 1))"
 endif()
 
 # ============================================================================
-# 安装规则（可选）
+# 安装规则
 # ============================================================================
 install(TARGETS stereo_depth DESTINATION bin)
 

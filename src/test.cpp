@@ -8,18 +8,26 @@
 #include <string>
 #include <algorithm>
 
-// GPU 模块
-#include "vulkan/context.hpp"
-#include "vulkan/stereo_pipeline.hpp"
-// CPU 模块
-#include "cpu_stereo/cpu_stereo_matcher.hpp"
-// 通用工具
+// 通用工具（必须无条件包含）
 #include "utils/logger.hpp"
 #include "utils/config.hpp"
 
-using namespace stereo_depth;
-using namespace stereo_depth::vulkan;
+// ---------- CPU 模块（仅在 ENABLE_CPU 为真时编译）----------
+#if ENABLE_CPU
+#include "cpu_stereo/cpu_stereo_matcher.hpp"
 using namespace stereo_depth::cpu_stereo;
+#endif
+
+// ---------- GPU 模块（仅在 ENABLE_GPU 为真时编译）----------
+#if ENABLE_GPU
+#include "vulkan/context.hpp"
+#include "vulkan/stereo_pipeline.hpp"
+using namespace stereo_depth::vulkan;
+#endif
+
+// 使用 utils 命名空间简化代码
+using namespace stereo_depth::utils;
+using namespace stereo_depth;
 
 bool isImageFile(const std::string& filename) {
     std::string ext;
@@ -65,12 +73,12 @@ bool ensureDirectory(const std::string& path) {
 }
 
 int main(int argc, char** argv) {
-    utils::Logger::initialize("stereo", spdlog::level::info);
+    Logger::initialize("stereo", spdlog::level::info);
     LOG_INFO("=========================================");
     LOG_INFO("  立体匹配批量处理工具启动");
     LOG_INFO("=========================================");
 
-    auto& cfg_mgr = utils::ConfigManager::getInstance();
+    auto& cfg_mgr = ConfigManager::getInstance();
     if (!cfg_mgr.loadGlobalConfig("config/global_config.yaml")) {
         LOG_ERROR("加载全局配置失败");
         return -1;
@@ -102,8 +110,9 @@ int main(int argc, char** argv) {
     }
     LOG_INFO("找到 {} 个图像文件", image_files.size());
 
-    // ---------- 根据模式选择处理引擎 ----------
+    // ---------- CPU 模式 ----------
     if (system_mode == "cpu") {
+#if ENABLE_CPU
         LOG_INFO("使用 CPU 立体匹配引擎");
         CpuStereoMatcher cpu_matcher;
         if (!cpu_matcher.initializeFromConfig()) {
@@ -135,7 +144,6 @@ int main(int argc, char** argv) {
             cv::Mat disp_16u = cpu_matcher.compute(left_img, right_img);
             double time_ms = cpu_matcher.getLastTimeMs();
 
-            // 检查是否全黑
             double min_val, max_val;
             cv::minMaxLoc(disp_16u, &min_val, &max_val);
             LOG_DEBUG("  视差统计 - 最小值: {:.0f}, 最大值: {:.0f}", min_val, max_val);
@@ -163,9 +171,15 @@ int main(int argc, char** argv) {
         if (success_count > 0) {
             LOG_INFO("平均每帧: {:.2f} ms", total_sec * 1000.0 / success_count);
         }
-
-    } else {
-        // ========== GPU 模式（原有 Vulkan 流水线）==========
+#else
+        LOG_ERROR("当前编译未启用CPU模块，无法运行CPU模式");
+        LOG_ERROR("请重新编译：cmake .. -DENABLE_CPU=ON");
+        return -1;
+#endif
+    }
+    // ---------- GPU 模式 ----------
+    else {
+#if ENABLE_GPU
         LOG_INFO("使用 GPU Vulkan 立体匹配引擎");
 
         VulkanContext ctx;
@@ -244,6 +258,11 @@ int main(int argc, char** argv) {
         if (success_count > 0) {
             LOG_INFO("平均每帧: {:.2f} ms", total_sec * 1000.0 / success_count);
         }
+#else
+        LOG_ERROR("当前编译未启用GPU模块，无法运行GPU模式");
+        LOG_ERROR("请重新编译：cmake .. -DENABLE_GPU=ON -DENABLE_CPU=OFF");
+        return -1;
+#endif
     }
 
     LOG_INFO("=========================================");
