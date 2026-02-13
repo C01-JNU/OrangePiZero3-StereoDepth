@@ -6,15 +6,24 @@
 namespace stereo_depth::vulkan {
 #define CHECK(expr, msg) do { if (!(expr)) { LOG_ERROR(msg); return false; } } while(0)
 
-StereoPipeline::StereoPipeline(const VulkanContext& context) : m_ctx(context) {}
+StereoPipeline::StereoPipeline(const VulkanContext& context) 
+    : m_ctx(context), m_device(context.getDevice()), m_queue(context.getComputeQueue()) {}
 
 StereoPipeline::~StereoPipeline() {
-    VkDevice dev = m_ctx.getDevice();
+    VkDevice dev = m_device;
     for (auto& lvl : m_levels) {
         if (lvl.layout != VK_NULL_HANDLE) {
             vkDestroyDescriptorSetLayout(dev, lvl.layout, nullptr);
             lvl.layout = VK_NULL_HANDLE;
         }
+        auto destroyCmd = [dev](LevelResources::CmdResources& c) {
+            if (c.fence)  vkDestroyFence(dev, c.fence, nullptr);
+            if (c.buffer) vkFreeCommandBuffers(dev, c.pool, 1, &c.buffer);
+            if (c.pool)   vkDestroyCommandPool(dev, c.pool, nullptr);
+            c.pool = VK_NULL_HANDLE; c.buffer = VK_NULL_HANDLE; c.fence = VK_NULL_HANDLE;
+        };
+        destroyCmd(lvl.censusCmd); destroyCmd(lvl.costCmd); destroyCmd(lvl.aggregateCmd);
+        destroyCmd(lvl.wtaCmd);    destroyCmd(lvl.postCmd); destroyCmd(lvl.downsampleCmd);
     }
 }
 
@@ -39,12 +48,12 @@ bool StereoPipeline::createLevelResources(uint32_t level, const PyramidLevelPara
     LevelResources& res = m_levels[level];
     res.width = params.width; res.height = params.height; res.maxDisparity = params.max_disparity;
     size_t pixels = static_cast<size_t>(res.width) * res.height;
-    size_t imgBytes = pixels * sizeof(uint32_t);
+    size_t imgBytes    = pixels * sizeof(uint32_t);
     size_t censusBytes = pixels * 2 * sizeof(uint32_t);
     size_t costVolBytes = pixels * res.maxDisparity * sizeof(uint32_t);
-    size_t tempBytes = pixels * sizeof(uint32_t);
-    size_t debugBytes = 256 * sizeof(uint32_t);
-    size_t paramsBytes = sizeof(PipelineParams);
+    size_t tempBytes    = pixels * sizeof(uint32_t);
+    size_t debugBytes   = 256 * sizeof(uint32_t);
+    size_t paramsBytes  = sizeof(PipelineParams);
     auto createStorage = [this](VkDeviceSize size, const char* name) {
         auto buf = std::make_unique<BufferManager>(m_ctx);
         if (!buf->createStorageBuffer(size)) {
@@ -87,10 +96,15 @@ bool StereoPipeline::createLevelResources(uint32_t level, const PyramidLevelPara
     uniformParams.speckleRange   = params.speckle_range;
     uniformParams.medianSize     = params.median_size;
     uniformParams.padding[0] = uniformParams.padding[1] = uniformParams.padding[2] = 0;
-
     CHECK(res.params->copyToBuffer(&uniformParams, sizeof(uniformParams)), "上传Uniform参数失败");
+
     CHECK(createDescriptorSetLayout(res), "创建描述符集布局失败");
     CHECK(createPipelines(res, level), "创建管线失败");
+    CHECK(createCmdResources(res.censusCmd) && createCmdResources(res.costCmd) &&
+          createCmdResources(res.aggregateCmd) && createCmdResources(res.wtaCmd) &&
+          createCmdResources(res.postCmd) && createCmdResources(res.downsampleCmd),
+          "创建命令资源失败");
+
     LOG_DEBUG("层{} 资源创建成功: {}x{}", level, res.width, res.height);
     return true;
 }
@@ -107,8 +121,7 @@ bool StereoPipeline::createDescriptorSetLayout(LevelResources& res) {
     VkDescriptorSetLayoutCreateInfo info = {};
     info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     info.bindingCount = 6; info.pBindings = bindings;
-    VkDevice dev = m_ctx.getDevice();
-    CHECK(vkCreateDescriptorSetLayout(dev, &info, nullptr, &res.layout) == VK_SUCCESS,
+    CHECK(vkCreateDescriptorSetLayout(m_device, &info, nullptr, &res.layout) == VK_SUCCESS,
           "创建描述符集布局失败");
     return true;
 }
@@ -119,25 +132,30 @@ bool StereoPipeline::createPipelines(LevelResources& res, uint32_t level) {
     res.aggregatePipe = std::make_unique<ComputePipeline>(m_ctx);
     res.wtaPipe       = std::make_unique<ComputePipeline>(m_ctx);
     res.postPipe      = std::make_unique<ComputePipeline>(m_ctx);
+    res.downsamplePipe = std::make_unique<ComputePipeline>(m_ctx);
 
     res.censusPipe->setDescriptorSetLayout(res.layout);
     res.costPipe->setDescriptorSetLayout(res.layout);
     res.aggregatePipe->setDescriptorSetLayout(res.layout);
     res.wtaPipe->setDescriptorSetLayout(res.layout);
     res.postPipe->setDescriptorSetLayout(res.layout);
+    res.downsamplePipe->setDescriptorSetLayout(res.layout);
 
-    // 修正：传入不含 .comp 后缀的基本名
     CHECK(loadShader(*res.censusPipe,    "census",      level), "加载 Census 着色器失败");
     CHECK(loadShader(*res.costPipe,      "cost",        level), "加载 Cost 着色器失败");
     CHECK(loadShader(*res.aggregatePipe, "aggregation", level), "加载 Aggregate 着色器失败");
     CHECK(loadShader(*res.wtaPipe,       "wta",         level), "加载 WTA 着色器失败");
     CHECK(loadShader(*res.postPipe,      "postprocess", level), "加载 Postprocess 着色器失败");
+    CHECK(loadShader(*res.downsamplePipe, "downsample", level), "加载 Downsample 着色器失败");
 
-    CHECK(res.censusPipe->createPipeline(),    "创建 Census 管线失败");
-    CHECK(res.costPipe->createPipeline(),      "创建 Cost 管线失败");
-    CHECK(res.aggregatePipe->createPipeline(), "创建 Aggregate 管线失败");
-    CHECK(res.wtaPipe->createPipeline(),       "创建 WTA 管线失败");
-    CHECK(res.postPipe->createPipeline(),      "创建 Postprocess 管线失败");
+    // 普通管线无 push constant
+    CHECK(res.censusPipe->createPipeline(0),    "创建 Census 管线失败");
+    CHECK(res.costPipe->createPipeline(0),      "创建 Cost 管线失败");
+    CHECK(res.aggregatePipe->createPipeline(0), "创建 Aggregate 管线失败");
+    CHECK(res.wtaPipe->createPipeline(0),       "创建 WTA 管线失败");
+    CHECK(res.postPipe->createPipeline(0),      "创建 Postprocess 管线失败");
+    // 下采样管线需要 push constant（4个 uint = 16字节）
+    CHECK(res.downsamplePipe->createPipeline(16), "创建 Downsample 管线失败");
 
     auto bindBuffers = [&](ComputePipeline& pipe,
                            VkBuffer b1, VkBuffer b2, VkBuffer b3, VkBuffer b4) -> bool {
@@ -164,12 +182,39 @@ bool StereoPipeline::createPipelines(LevelResources& res, uint32_t level) {
     CHECK(bindBuffers(*res.postPipe,
         res.disparity->getBuffer(), res.temp->getBuffer(),
         res.disparity->getBuffer(), res.temp->getBuffer()), "Postprocess 描述符集失败");
+    CHECK(bindBuffers(*res.downsamplePipe,
+        res.disparity->getBuffer(), res.temp->getBuffer(),
+        res.disparity->getBuffer(), res.temp->getBuffer()), "Downsample 描述符集失败");
 
     return true;
 }
 
+bool StereoPipeline::createCmdResources(LevelResources::CmdResources& cmd) {
+    VkCommandPoolCreateInfo poolInfo = {};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    // 修正：使用 findComputeQueueFamily() 获取队列族索引
+    poolInfo.queueFamilyIndex = m_ctx.getComputeQueueFamilyIndex();
+    CHECK(vkCreateCommandPool(m_device, &poolInfo, nullptr, &cmd.pool) == VK_SUCCESS,
+          "创建命令池失败");
+
+    VkCommandBufferAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = cmd.pool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+    CHECK(vkAllocateCommandBuffers(m_device, &allocInfo, &cmd.buffer) == VK_SUCCESS,
+          "分配命令缓冲失败");
+
+    VkFenceCreateInfo fenceInfo = {};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    CHECK(vkCreateFence(m_device, &fenceInfo, nullptr, &cmd.fence) == VK_SUCCESS,
+          "创建Fence失败");
+    return true;
+}
+
 bool StereoPipeline::loadShader(ComputePipeline& pipe, const std::string& name, uint32_t level) {
-    // 构建文件名：name_layer{level}.comp.spv
     std::string spvFile = "src/vulkan/spv/" + name + "_layer" + std::to_string(level) + ".comp.spv";
     if (pipe.loadShaderFromFile(spvFile)) {
         LOG_DEBUG("加载着色器: {}", spvFile);
@@ -179,24 +224,22 @@ bool StereoPipeline::loadShader(ComputePipeline& pipe, const std::string& name, 
     return false;
 }
 
-bool StereoPipeline::executePipeline(ComputePipeline& pipe, uint32_t level,
-                                     uint32_t gx, uint32_t gy) {
-    VkCommandPool pool = m_ctx.createCommandPool();
-    CHECK(pool != VK_NULL_HANDLE, "创建命令池失败");
-    VkCommandBuffer cmd = m_ctx.createCommandBuffer(pool);
-    CHECK(cmd != VK_NULL_HANDLE, "创建命令缓冲区失败");
+bool StereoPipeline::executePipeline(ComputePipeline& pipe, LevelResources::CmdResources& cmd,
+                                     uint32_t level, uint32_t gx, uint32_t gy) {
+    vkWaitForFences(m_device, 1, &cmd.fence, VK_TRUE, UINT64_MAX);
+    vkResetFences(m_device, 1, &cmd.fence);
+    vkResetCommandBuffer(cmd.buffer, 0);
+
     VkCommandBufferBeginInfo beginInfo = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    CHECK(vkBeginCommandBuffer(cmd, &beginInfo) == VK_SUCCESS, "开始命令缓冲区失败");
-    pipe.recordCommands(cmd, gx, gy, 1);
-    CHECK(vkEndCommandBuffer(cmd) == VK_SUCCESS, "结束命令缓冲区失败");
+    CHECK(vkBeginCommandBuffer(cmd.buffer, &beginInfo) == VK_SUCCESS, "开始命令缓冲区失败");
+    pipe.recordCommands(cmd.buffer, gx, gy, 1);
+    CHECK(vkEndCommandBuffer(cmd.buffer) == VK_SUCCESS, "结束命令缓冲区失败");
+
     VkSubmitInfo submitInfo = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submitInfo.commandBufferCount = 1; submitInfo.pCommandBuffers = &cmd;
-    CHECK(vkQueueSubmit(m_ctx.getComputeQueue(), 1, &submitInfo, VK_NULL_HANDLE) == VK_SUCCESS,
-          "提交命令失败");
-    vkQueueWaitIdle(m_ctx.getComputeQueue());
-    vkFreeCommandBuffers(m_ctx.getDevice(), pool, 1, &cmd);
-    vkDestroyCommandPool(m_ctx.getDevice(), pool, nullptr);
+    submitInfo.commandBufferCount = 1; 
+    submitInfo.pCommandBuffers = &cmd.buffer;
+    CHECK(vkQueueSubmit(m_queue, 1, &submitInfo, cmd.fence) == VK_SUCCESS, "提交命令失败");
     return true;
 }
 
@@ -222,45 +265,63 @@ bool StereoPipeline::setRightImage(const uint8_t* data) {
 
 bool StereoPipeline::uploadAndStitch() { return true; }
 
-bool StereoPipeline::downsampleDisparity(uint32_t fromLevel, uint32_t toLevel) {
-    LOG_WARN("视差下采样使用最近邻复制");
+bool StereoPipeline::downsampleDisparityGPU(uint32_t fromLevel, uint32_t toLevel) {
     auto& from = m_levels[fromLevel];
     auto& to   = m_levels[toLevel];
-    size_t fromPixels = from.width * from.height;
-    size_t toPixels   = to.width * to.height;
-    std::vector<uint32_t> fromData(fromPixels);
-    CHECK(from.disparity->copyFromBuffer(fromData.data(), fromPixels * sizeof(uint32_t)),
-          "读取上层视差失败");
-    std::vector<uint32_t> toData(toPixels);
-    float scale_x = static_cast<float>(from.width) / to.width;
-    float scale_y = static_cast<float>(from.height) / to.height;
-    for (uint32_t ty = 0; ty < to.height; ++ty) {
-        uint32_t sy = static_cast<uint32_t>(ty * scale_y);
-        for (uint32_t tx = 0; tx < to.width; ++tx) {
-            uint32_t sx = static_cast<uint32_t>(tx * scale_x);
-            toData[ty * to.width + tx] = fromData[sy * from.width + sx];
-        }
-    }
-    return to.disparity->copyToBuffer(toData.data(), toPixels * sizeof(uint32_t));
+
+    struct PushParams {
+        uint32_t fromWidth, fromHeight, toWidth, toHeight;
+    } pushParams = { from.width, from.height, to.width, to.height };
+
+    uint32_t gx = (to.width  + WORKGROUP_X - 1) / WORKGROUP_X;
+    uint32_t gy = (to.height + WORKGROUP_Y - 1) / WORKGROUP_Y;
+
+    auto& cmd = to.downsampleCmd;
+    vkWaitForFences(m_device, 1, &cmd.fence, VK_TRUE, UINT64_MAX);
+    vkResetFences(m_device, 1, &cmd.fence);
+    vkResetCommandBuffer(cmd.buffer, 0);
+
+    VkCommandBufferBeginInfo beginInfo = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    CHECK(vkBeginCommandBuffer(cmd.buffer, &beginInfo) == VK_SUCCESS, "开始命令缓冲区失败");
+
+    to.downsamplePipe->recordCommands(cmd.buffer, gx, gy, 1, &pushParams, sizeof(pushParams));
+
+    CHECK(vkEndCommandBuffer(cmd.buffer) == VK_SUCCESS, "结束命令缓冲区失败");
+
+    VkSubmitInfo submitInfo = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmd.buffer;
+    CHECK(vkQueueSubmit(m_queue, 1, &submitInfo, cmd.fence) == VK_SUCCESS, "提交下采样命令失败");
+    return true;
 }
 
 bool StereoPipeline::compute() {
     CHECK(m_initialized, "流水线未初始化");
     CHECK(!m_leftCpu.empty() && !m_rightCpu.empty(), "左右图像未设置");
+
     for (int32_t level = static_cast<int32_t>(m_levels.size()) - 1; level >= 0; --level) {
         auto& res = m_levels[level];
+
         if (level != static_cast<int32_t>(m_levels.size()) - 1) {
-            CHECK(downsampleDisparity(level + 1, level), "视差下采样失败");
+            CHECK(downsampleDisparityGPU(level + 1, level), "视差下采样失败");
+            vkWaitForFences(m_device, 1, &res.downsampleCmd.fence, VK_TRUE, UINT64_MAX);
         }
+
         uint32_t gx = (res.width  + WORKGROUP_X - 1) / WORKGROUP_X;
         uint32_t gy = (res.height + WORKGROUP_Y - 1) / WORKGROUP_Y;
-        LOG_DEBUG("执行层{}: {}x{}, 工作组 {}x{}", level, res.width, res.height, gx, gy);
-        CHECK(executePipeline(*res.censusPipe,    level, gx, gy), "Census 失败");
-        CHECK(executePipeline(*res.costPipe,      level, gx, gy), "Cost 失败");
-        CHECK(executePipeline(*res.aggregatePipe, level, gx, gy), "Aggregate 失败");
-        CHECK(executePipeline(*res.wtaPipe,       level, gx, gy), "WTA 失败");
-        CHECK(executePipeline(*res.postPipe,      level, gx, gy), "Postprocess 失败");
+
+        CHECK(executePipeline(*res.censusPipe,    res.censusCmd,    level, gx, gy), "Census 失败");
+        CHECK(executePipeline(*res.costPipe,      res.costCmd,      level, gx, gy), "Cost 失败");
+        CHECK(executePipeline(*res.aggregatePipe, res.aggregateCmd, level, gx, gy), "Aggregate 失败");
+        CHECK(executePipeline(*res.wtaPipe,       res.wtaCmd,       level, gx, gy), "WTA 失败");
+        CHECK(executePipeline(*res.postPipe,      res.postCmd,      level, gx, gy), "Postprocess 失败");
+
+        VkFence fences[] = {res.censusCmd.fence, res.costCmd.fence, res.aggregateCmd.fence,
+                            res.wtaCmd.fence, res.postCmd.fence};
+        vkWaitForFences(m_device, 5, fences, VK_TRUE, UINT64_MAX);
     }
+
     LOG_INFO("立体匹配计算完成");
     return true;
 }
@@ -286,5 +347,4 @@ bool StereoPipeline::getDebugBuffer(uint32_t level, uint32_t stage, void* output
     CHECK(dbg && dbg->isValid(), "调试缓冲区无效");
     return dbg->copyFromBuffer(output, std::min(size, dbg->getSize()));
 }
-
 } // namespace stereo_depth::vulkan
