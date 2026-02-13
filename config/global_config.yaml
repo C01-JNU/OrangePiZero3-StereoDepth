@@ -15,7 +15,7 @@ system:
   # 可选值:
   #   "gpu" - Vulkan GPU 加速流水线（需 Mali-G31 及 PanVK 驱动）
   #   "cpu" - CPU 立体匹配引擎（支持 OpenCV BM/SGBM 及自定义 Census+WTA）
-  # 默认: "gpu"
+  # 默认: "cpu"
   mode: "cpu"                     # 当前推荐使用 CPU 模式，GPU 优化中
 
   # 调试日志级别
