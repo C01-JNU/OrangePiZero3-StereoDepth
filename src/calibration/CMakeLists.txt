@@ -46,7 +46,8 @@ target_link_libraries(calibration_utils
     yaml-cpp
 )
 
-# 设置包含目录
+# 设置包含目录 - 修复头文件搜索路径
+# 可执行文件：需要当前目录和上级目录（src）
 target_include_directories(stereo_calibrator PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/..
@@ -59,9 +60,10 @@ target_include_directories(test_calibration PRIVATE
     ${OpenCV_INCLUDE_DIRS}
 )
 
-# 设置库的公共包含目录
+# 库：需要当前目录和上级目录（src），设为 PUBLIC 以便链接者继承
 target_include_directories(calibration_utils PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${OpenCV_INCLUDE_DIRS}
 )
 
@@ -84,4 +86,4 @@ set_target_properties(stereo_calibrator test_calibration calibration_utils
     CXX_EXTENSIONS OFF
 )
 
-message(STATUS "标定模块配置完成")
+message(STATUS "标定模块配置完成（修复包含路径）")

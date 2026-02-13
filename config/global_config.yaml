@@ -1,5 +1,5 @@
 # ============================================================================
-# OrangePiZero3-StereoDepth 全局配置文件（详细注释版）
+# OrangePiZero3-StereoDepth 全局配置文件（完整注释版）
 # 最后更新: 2026年2月13日
 # 作者: C01-JNU & AI助手
 # 说明：所有参数均通过编译时生成脚本注入着色器/C++代码，修改后需重新编译。
@@ -12,9 +12,11 @@
 system:
   # 运行模式
   # 类型: string
-  # 可选值: "gpu"（Vulkan加速）, "cpu"（预留，暂未实现）
+  # 可选值:
+  #   "gpu" - Vulkan GPU 加速流水线（需 Mali-G31 及 PanVK 驱动）
+  #   "cpu" - CPU 立体匹配引擎（支持 OpenCV BM/SGBM 及自定义 Census+WTA）
   # 默认: "gpu"
-  mode: "gpu"
+  mode: "cpu"                     # 当前推荐使用 CPU 模式，GPU 优化中
 
   # 调试日志级别
   # 类型: int
@@ -27,18 +29,15 @@ system:
   debug_level: 2
 
   # 是否将日志写入文件
-  # 类型: bool
-  # 默认: false
   log_to_file: false
-
   # 日志文件路径（当 log_to_file 为 true 时有效）
   log_file_path: "logs/stereo_depth.log"
 
 # ----------------------------------------------------------------------------
-# 2. GPU / Vulkan 配置
+# 2. GPU / Vulkan 配置（仅当 system.mode = "gpu" 时生效）
 # ----------------------------------------------------------------------------
 gpu:
-  # 是否启用GPU加速（若为false则自动回退CPU，但CPU模式未实现）
+  # 是否启用GPU加速（若为false则自动回退CPU，但CPU模式需单独配置）
   enabled: true
 
   # Vulkan API 版本
@@ -55,18 +54,15 @@ gpu:
   shader_workgroup_size: [16, 16]
 
   # 最大GPU内存使用（MB）
-  # 类型: uint
-  # 根据实际空闲内存调整，OrangePi Zero3 通常设置 256~512
   max_memory_mb: 256
 
   # 是否使用异步传输队列（暂未实现，预留）
   use_async_transfer: true
-
   # 暂存缓冲区大小（MB），用于 staging buffer
   staging_buffer_size: 16
 
 # ----------------------------------------------------------------------------
-# 3. 摄像头与图像基础配置
+# 3. 摄像头与图像基础配置（CPU/GPU通用）
 # ----------------------------------------------------------------------------
 camera:
   # 原始拼接图像宽度（像素）
@@ -91,7 +87,7 @@ camera:
   denoise_strength: 0.5
 
 # ----------------------------------------------------------------------------
-# 4. 金字塔多层配置
+# 4. 金字塔多层配置（仅 GPU 模式使用，CPU 模式忽略）
 # ----------------------------------------------------------------------------
 pyramid:
   # 是否启用分辨率金字塔
@@ -125,17 +121,27 @@ pyramid:
   search_radius: 8
 
 # ----------------------------------------------------------------------------
-# 5. 立体匹配算法默认参数
-#    各层可通过 layer_overrides 单独覆盖
+# 5. 立体匹配算法通用参数（CPU/GPU 均会使用）
+#    各层可通过 layer_overrides 单独覆盖（仅 GPU）
 # ----------------------------------------------------------------------------
 stereo:
+  # ---------- 核心算法选择 ----------
+  # 算法名称（CPU模式有效，GPU模式固定为自定义 Census+WTA）
+  # 类型: string
+  # 可选值:
+  #   "census_wta" - 自定义 Census 变换 + 汉明距离 + WTA（纯CPU实现）
+  #   "bm"         - OpenCV StereoBM（快速，精度一般）
+  #   "sgbm"       - OpenCV StereoSGBM（精度较高，速度适中）
+  # 默认: "sgbm"
+  algorithm: "sgbm"
+
   # ---------- 图像尺寸（自动计算，无需在此配置）----------
   # 单眼宽度 = camera.width / 2
   # 单眼高度 = camera.height
-  # 各层宽高由 pyramid 配置自动生成
+  # 各层宽高由 pyramid 配置自动生成（仅GPU）
 
   # ---------- 核心算法参数 ----------
-  # Census 变换窗口大小
+  # Census 变换窗口大小（用于自定义 census_wta 以及 GPU 流水线）
   # 类型: uint
   # 建议: 7（9×9窗口边界处理困难，7×7为平衡选择）
   # 说明：必须为奇数，着色器内使用共享内存优化
@@ -150,9 +156,7 @@ stereo:
   # 最小视差（通常为0）
   min_disparity: 0
 
-  # 代价聚合窗口大小（盒式滤波）
-  # 类型: uint
-  # 建议: 5（5×5窗口）
+  # 代价聚合窗口大小（盒式滤波，仅 GPU 流水线使用）
   cost_aggregation_window: 5
 
   # 唯一性比率（%）
@@ -161,34 +165,34 @@ stereo:
   # 说明：WTA时，若 (第二小代价 / 最小代价) < (1 + uniqueness_ratio/100)，则认为匹配歧义，标记为无效视差
   uniqueness_ratio: 15
 
-  # 平滑惩罚参数 P1（小视差变化）
+  # 平滑惩罚参数 P1（小视差变化）—— 主要用于 SGBM，其他算法预留
   # 类型: float
-  # 说明：目前未在着色器中使用，预留
+  # 说明：SGBM 中 p1 = 8 * blockSize^2 经验值，这里保留配置灵活性
   penalty_p1: 8.0
 
   # 平滑惩罚参数 P2（大视差变化）
   # 类型: float
-  # 说明：目前未在着色器中使用，预留
+  # 说明：SGBM 中 p2 = 32 * blockSize^2 经验值
   penalty_p2: 32.0
 
   # ---------- 功能开关 ----------
   # 是否使用 Census 变换（若禁用，代价计算将直接使用像素灰度差，当前未实现）
   use_census: true
-  # 是否启用后处理（斑点过滤等）
+  # 是否启用后处理（斑点过滤等，仅GPU）
   enable_postprocessing: true
-  # 是否启用中值滤波
+  # 是否启用中值滤波（CPU/GPU均支持）
   use_median_filter: true
 
   # ---------- 后处理参数 ----------
-  # 斑点窗口大小（像素）
+  # 斑点窗口大小（像素，仅GPU）
   speckle_window_size: 100
-  # 斑点视差差阈值
+  # 斑点视差差阈值（仅GPU）
   speckle_range: 32
   # 中值滤波器尺寸（必须为奇数）
   median_filter_size: 3
 
 # ----------------------------------------------------------------------------
-# 6. 金字塔层独立参数覆盖
+# 6. 金字塔层独立参数覆盖（仅 GPU 模式使用）
 #    此处定义的字段会覆盖 stereo 节中的同名参数
 #    未列出的层使用 stereo 节默认值
 # ----------------------------------------------------------------------------
@@ -214,9 +218,9 @@ calibration:
   # 标定结果文件路径（YAML格式）
   calibration_file: "calibration_results/stereo_calibration.yml"
   # 是否使用标定参数进行立体校正
-  use_calibration: true
+  use_calibration: false
   # 是否在校正阶段重映射图像（CPU实现）
-  rectify_images: true
+  rectify_images: false
 
   # 棋盘格标定板内角点数（宽，高）
   chessboard_size: [9, 6]
