@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import yaml
 import os
-import sys
 import argparse
 from generate_shader_config import compute_layer_params
 
@@ -28,6 +27,7 @@ struct PyramidLevelParams {{
     uint32_t width; uint32_t height; uint32_t max_disparity; uint32_t window_size;
     uint32_t aggregation_window; float uniqueness_ratio; float penalty_p1; float penalty_p2;
     uint32_t flags; uint32_t speckle_window; uint32_t speckle_range; uint32_t median_size;
+    uint32_t search_radius;   // 新增：搜索半径
 }};
 constexpr uint32_t PYRAMID_LEVEL_COUNT = {levels}u;
 constexpr PyramidLevelParams PYRAMID_LEVELS[PYRAMID_LEVEL_COUNT] = {{
@@ -38,7 +38,8 @@ constexpr PyramidLevelParams PYRAMID_LEVELS[PYRAMID_LEVEL_COUNT] = {{
       {p['aggregation_window']}u, {p['uniqueness_ratio']}f,
       {p['penalty_p1']}f, {p['penalty_p2']}f,
       {p['flags']}u, {p['speckle_window']}u,
-      {p['speckle_range']}u, {p['median_size']}u}},
+      {p['speckle_range']}u, {p['median_size']}u,
+      {p['search_radius']}u}},
 """
     header += f"""}};
 }} // namespace stereo_depth::vulkan

@@ -41,30 +41,39 @@ private:
     struct LevelResources {
         uint32_t width, height, maxDisparity;
 
-        std::unique_ptr<BufferManager> leftImg, rightImg, leftCensus, rightCensus;
-        std::unique_ptr<BufferManager> costVolume, disparity, temp, params, debug;
+        // 缓冲区
+        std::unique_ptr<BufferManager> leftImg, rightImg;
+        std::unique_ptr<BufferManager> leftCensus, rightCensus;
+        std::unique_ptr<BufferManager> disparity;      // 最终视差图
+        std::unique_ptr<BufferManager> priorDisparity; // 先验视差图（来自上层）
+        std::unique_ptr<BufferManager> temp;           // 临时缓冲区
+        std::unique_ptr<BufferManager> params;         // Uniform参数
+        std::unique_ptr<BufferManager> debug;          // 调试缓冲区
 
         VkDescriptorSetLayout layout = VK_NULL_HANDLE;
 
-        // 五个阶段的管线
-        std::unique_ptr<ComputePipeline> censusPipe, costPipe, aggregatePipe, wtaPipe, postPipe;
-        // 下采样专用管线
-        std::unique_ptr<ComputePipeline> downsamplePipe;
+        // 管线
+        std::unique_ptr<ComputePipeline> censusPipe;
+        std::unique_ptr<ComputePipeline> costWtaPipe;   // 合并管线（带先验）
+        std::unique_ptr<ComputePipeline> postPipe;
+        std::unique_ptr<ComputePipeline> downsamplePipe; // 输出到 prior
 
-        // 每个阶段复用的命令池 + 命令缓冲 + Fence
+        // 命令资源
         struct CmdResources {
             VkCommandPool   pool   = VK_NULL_HANDLE;
             VkCommandBuffer buffer = VK_NULL_HANDLE;
             VkFence         fence  = VK_NULL_HANDLE;
         };
-        CmdResources censusCmd, costCmd, aggregateCmd, wtaCmd, postCmd, downsampleCmd;
+        CmdResources censusCmd, costWtaCmd, postCmd, downsampleCmd;
     };
     std::vector<LevelResources> m_levels;
 
+    // Uniform结构体（56字节，包含searchRadius）
     struct PipelineParams {
         uint32_t imageWidth, imageHeight, maxDisparity, windowSize;
         float uniquenessRatio, penaltyP1, penaltyP2;
-        uint32_t flags, speckleWindow, speckleRange, medianSize, padding[3];
+        uint32_t flags, speckleWindow, speckleRange, medianSize, searchRadius;
+        uint32_t padding[2];
     };
     static_assert(sizeof(PipelineParams) == 56, "PipelineParams must be 56 bytes");
 
@@ -76,7 +85,6 @@ private:
     bool executePipeline(ComputePipeline& pipe, LevelResources::CmdResources& cmd,
                          uint32_t level, uint32_t gx, uint32_t gy);
     void expand8To32(const uint8_t* src, uint32_t* dst, size_t count);
-    bool uploadAndStitch();
-    bool downsampleDisparityGPU(uint32_t fromLevel, uint32_t toLevel);
+    bool downsamplePriorGPU(uint32_t fromLevel, uint32_t toLevel); // 输出到 prior
 };
 } // namespace stereo_depth::vulkan

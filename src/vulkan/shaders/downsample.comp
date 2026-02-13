@@ -1,13 +1,13 @@
 #version 450
+// 视差图下采样着色器（最近邻）
+// 输入：上层视差图 (fromLevel)
+// 输出：当前层先验视差图 (priorDisparity)
 layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y) in;
 layout(push_constant) uniform PushConstants {
-    uint fromWidth;
-    uint fromHeight;
-    uint toWidth;
-    uint toHeight;
+    uint fromWidth, fromHeight, toWidth, toHeight;
 } params;
 layout(binding = 1) readonly buffer InputDisparity { uint disp[]; } inDisp;
-layout(binding = 3) writeonly buffer OutputDisparity { uint disp[]; } outDisp;
+layout(binding = 4) writeonly buffer PriorDisparity { uint disp[]; } priorDisp;  // 改为 binding 4
 layout(binding = 5) writeonly buffer Debug { uint data[]; } debug;
 void main() {
     uint tx = gl_GlobalInvocationID.x;
@@ -19,7 +19,7 @@ void main() {
     sy = min(sy, params.fromHeight - 1u);
     uint srcIdx = sy * params.fromWidth + sx;
     uint dstIdx = ty * params.toWidth + tx;
-    outDisp.disp[dstIdx] = inDisp.disp[srcIdx];
+    priorDisp.disp[dstIdx] = inDisp.disp[srcIdx];
     if (tx == 0 && ty == 0) {
         debug.data[0] = params.fromWidth;
         debug.data[1] = params.fromHeight;

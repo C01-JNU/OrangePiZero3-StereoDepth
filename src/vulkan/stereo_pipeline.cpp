@@ -22,8 +22,10 @@ StereoPipeline::~StereoPipeline() {
             if (c.pool)   vkDestroyCommandPool(dev, c.pool, nullptr);
             c.pool = VK_NULL_HANDLE; c.buffer = VK_NULL_HANDLE; c.fence = VK_NULL_HANDLE;
         };
-        destroyCmd(lvl.censusCmd); destroyCmd(lvl.costCmd); destroyCmd(lvl.aggregateCmd);
-        destroyCmd(lvl.wtaCmd);    destroyCmd(lvl.postCmd); destroyCmd(lvl.downsampleCmd);
+        destroyCmd(lvl.censusCmd);
+        destroyCmd(lvl.costWtaCmd);
+        destroyCmd(lvl.postCmd);
+        destroyCmd(lvl.downsampleCmd);
     }
 }
 
@@ -33,10 +35,11 @@ bool StereoPipeline::initialize() {
     m_baseWidth  = PYRAMID_LEVELS[0].width;
     m_baseHeight = PYRAMID_LEVELS[0].height;
     m_leftCpu.clear(); m_rightCpu.clear();
-    LOG_INFO("初始化立体匹配流水线，金字塔层数: {}", PYRAMID_LEVEL_COUNT);
+    LOG_INFO("初始化立体匹配流水线（视差先验传播优化版），金字塔层数: {}", PYRAMID_LEVEL_COUNT);
     for (uint32_t i = 0; i < PYRAMID_LEVEL_COUNT; ++i) {
-        LOG_DEBUG("  层{}: {}x{} 视差={}", i, PYRAMID_LEVELS[i].width,
-                  PYRAMID_LEVELS[i].height, PYRAMID_LEVELS[i].max_disparity);
+        LOG_DEBUG("  层{}: {}x{} 视差={} 搜索半径={}", i,
+                  PYRAMID_LEVELS[i].width, PYRAMID_LEVELS[i].height,
+                  PYRAMID_LEVELS[i].max_disparity, PYRAMID_LEVELS[i].search_radius);
         CHECK(createLevelResources(i, PYRAMID_LEVELS[i]), "创建层资源失败");
     }
     m_initialized = true;
@@ -50,10 +53,10 @@ bool StereoPipeline::createLevelResources(uint32_t level, const PyramidLevelPara
     size_t pixels = static_cast<size_t>(res.width) * res.height;
     size_t imgBytes    = pixels * sizeof(uint32_t);
     size_t censusBytes = pixels * 2 * sizeof(uint32_t);
-    size_t costVolBytes = pixels * res.maxDisparity * sizeof(uint32_t);
-    size_t tempBytes    = pixels * sizeof(uint32_t);
-    size_t debugBytes   = 256 * sizeof(uint32_t);
-    size_t paramsBytes  = sizeof(PipelineParams);
+    size_t tempBytes   = pixels * sizeof(uint32_t);
+    size_t debugBytes  = 256 * sizeof(uint32_t);
+    size_t paramsBytes = sizeof(PipelineParams);
+
     auto createStorage = [this](VkDeviceSize size, const char* name) {
         auto buf = std::make_unique<BufferManager>(m_ctx);
         if (!buf->createStorageBuffer(size)) {
@@ -70,17 +73,18 @@ bool StereoPipeline::createLevelResources(uint32_t level, const PyramidLevelPara
         }
         return buf;
     };
+
     res.leftImg    = createStorage(imgBytes,     "LeftImage");
     res.rightImg   = createStorage(imgBytes,     "RightImage");
     res.leftCensus = createStorage(censusBytes,  "LeftCensus");
     res.rightCensus= createStorage(censusBytes,  "RightCensus");
-    res.costVolume = createStorage(costVolBytes, "CostVolume");
     res.disparity  = createStorage(tempBytes,    "Disparity");
+    res.priorDisparity = createStorage(tempBytes, "PriorDisparity"); // 新增先验缓冲区
     res.temp       = createStorage(tempBytes,    "Temp");
     res.params     = createUniform(paramsBytes,  "Params");
     res.debug      = createStorage(debugBytes,   "Debug");
     if (!res.leftImg || !res.rightImg || !res.leftCensus || !res.rightCensus ||
-        !res.costVolume || !res.disparity || !res.temp || !res.params || !res.debug)
+        !res.disparity || !res.priorDisparity || !res.temp || !res.params || !res.debug)
         return false;
 
     PipelineParams uniformParams = {};
@@ -95,13 +99,13 @@ bool StereoPipeline::createLevelResources(uint32_t level, const PyramidLevelPara
     uniformParams.speckleWindow  = params.speckle_window;
     uniformParams.speckleRange   = params.speckle_range;
     uniformParams.medianSize     = params.median_size;
-    uniformParams.padding[0] = uniformParams.padding[1] = uniformParams.padding[2] = 0;
+    uniformParams.searchRadius   = params.search_radius;   // 设置搜索半径
+    uniformParams.padding[0] = uniformParams.padding[1] = 0;
     CHECK(res.params->copyToBuffer(&uniformParams, sizeof(uniformParams)), "上传Uniform参数失败");
 
     CHECK(createDescriptorSetLayout(res), "创建描述符集布局失败");
     CHECK(createPipelines(res, level), "创建管线失败");
-    CHECK(createCmdResources(res.censusCmd) && createCmdResources(res.costCmd) &&
-          createCmdResources(res.aggregateCmd) && createCmdResources(res.wtaCmd) &&
+    CHECK(createCmdResources(res.censusCmd) && createCmdResources(res.costWtaCmd) &&
           createCmdResources(res.postCmd) && createCmdResources(res.downsampleCmd),
           "创建命令资源失败");
 
@@ -128,35 +132,26 @@ bool StereoPipeline::createDescriptorSetLayout(LevelResources& res) {
 
 bool StereoPipeline::createPipelines(LevelResources& res, uint32_t level) {
     res.censusPipe    = std::make_unique<ComputePipeline>(m_ctx);
-    res.costPipe      = std::make_unique<ComputePipeline>(m_ctx);
-    res.aggregatePipe = std::make_unique<ComputePipeline>(m_ctx);
-    res.wtaPipe       = std::make_unique<ComputePipeline>(m_ctx);
+    res.costWtaPipe   = std::make_unique<ComputePipeline>(m_ctx);
     res.postPipe      = std::make_unique<ComputePipeline>(m_ctx);
     res.downsamplePipe = std::make_unique<ComputePipeline>(m_ctx);
 
     res.censusPipe->setDescriptorSetLayout(res.layout);
-    res.costPipe->setDescriptorSetLayout(res.layout);
-    res.aggregatePipe->setDescriptorSetLayout(res.layout);
-    res.wtaPipe->setDescriptorSetLayout(res.layout);
+    res.costWtaPipe->setDescriptorSetLayout(res.layout);
     res.postPipe->setDescriptorSetLayout(res.layout);
     res.downsamplePipe->setDescriptorSetLayout(res.layout);
 
     CHECK(loadShader(*res.censusPipe,    "census",      level), "加载 Census 着色器失败");
-    CHECK(loadShader(*res.costPipe,      "cost",        level), "加载 Cost 着色器失败");
-    CHECK(loadShader(*res.aggregatePipe, "aggregation", level), "加载 Aggregate 着色器失败");
-    CHECK(loadShader(*res.wtaPipe,       "wta",         level), "加载 WTA 着色器失败");
+    CHECK(loadShader(*res.costWtaPipe,   "cost_wta",    level), "加载 CostWTA 着色器失败");
     CHECK(loadShader(*res.postPipe,      "postprocess", level), "加载 Postprocess 着色器失败");
     CHECK(loadShader(*res.downsamplePipe, "downsample", level), "加载 Downsample 着色器失败");
 
-    // 普通管线无 push constant
     CHECK(res.censusPipe->createPipeline(0),    "创建 Census 管线失败");
-    CHECK(res.costPipe->createPipeline(0),      "创建 Cost 管线失败");
-    CHECK(res.aggregatePipe->createPipeline(0), "创建 Aggregate 管线失败");
-    CHECK(res.wtaPipe->createPipeline(0),       "创建 WTA 管线失败");
+    CHECK(res.costWtaPipe->createPipeline(0),   "创建 CostWTA 管线失败");
     CHECK(res.postPipe->createPipeline(0),      "创建 Postprocess 管线失败");
-    // 下采样管线需要 push constant（4个 uint = 16字节）
     CHECK(res.downsamplePipe->createPipeline(16), "创建 Downsample 管线失败");
 
+    // 辅助lambda：绑定6个buffer，类型自动设置
     auto bindBuffers = [&](ComputePipeline& pipe,
                            VkBuffer b1, VkBuffer b2, VkBuffer b3, VkBuffer b4) -> bool {
         std::vector<VkBuffer> bufs = {
@@ -167,24 +162,26 @@ bool StereoPipeline::createPipelines(LevelResources& res, uint32_t level) {
         return pipe.createDescriptorSet(bufs, types);
     };
 
+    // Census: binding1=左图, binding2=右图, binding3=左Census, binding4=右Census
     CHECK(bindBuffers(*res.censusPipe,
         res.leftImg->getBuffer(), res.rightImg->getBuffer(),
         res.leftCensus->getBuffer(), res.rightCensus->getBuffer()), "Census 描述符集失败");
-    CHECK(bindBuffers(*res.costPipe,
+
+    // CostWTA: binding1=左Census, binding2=右Census, binding3=视差图输出, binding4=先验视差图
+    CHECK(bindBuffers(*res.costWtaPipe,
         res.leftCensus->getBuffer(), res.rightCensus->getBuffer(),
-        res.costVolume->getBuffer(), res.temp->getBuffer()), "Cost 描述符集失败");
-    CHECK(bindBuffers(*res.aggregatePipe,
-        res.costVolume->getBuffer(), res.temp->getBuffer(),
-        res.costVolume->getBuffer(), res.temp->getBuffer()), "Aggregate 描述符集失败");
-    CHECK(bindBuffers(*res.wtaPipe,
-        res.costVolume->getBuffer(), res.temp->getBuffer(),
-        res.disparity->getBuffer(), res.temp->getBuffer()), "WTA 描述符集失败");
+        res.disparity->getBuffer(), res.priorDisparity->getBuffer()), "CostWTA 描述符集失败");
+
+    // Postprocess: 输入视差图(binding1) -> 输出视差图(binding3)，原位更新
     CHECK(bindBuffers(*res.postPipe,
         res.disparity->getBuffer(), res.temp->getBuffer(),
         res.disparity->getBuffer(), res.temp->getBuffer()), "Postprocess 描述符集失败");
+
+    // Downsample: binding1=上层视差图(调用时指定from.disparity), binding4=输出当前层先验
+    // 这里绑定占位，实际执行时动态绑定不同层的buffer
     CHECK(bindBuffers(*res.downsamplePipe,
         res.disparity->getBuffer(), res.temp->getBuffer(),
-        res.disparity->getBuffer(), res.temp->getBuffer()), "Downsample 描述符集失败");
+        res.disparity->getBuffer(), res.priorDisparity->getBuffer()), "Downsample 描述符集失败");
 
     return true;
 }
@@ -193,7 +190,6 @@ bool StereoPipeline::createCmdResources(LevelResources::CmdResources& cmd) {
     VkCommandPoolCreateInfo poolInfo = {};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    // 修正：使用 findComputeQueueFamily() 获取队列族索引
     poolInfo.queueFamilyIndex = m_ctx.getComputeQueueFamilyIndex();
     CHECK(vkCreateCommandPool(m_device, &poolInfo, nullptr, &cmd.pool) == VK_SUCCESS,
           "创建命令池失败");
@@ -263,9 +259,8 @@ bool StereoPipeline::setRightImage(const uint8_t* data) {
     return m_levels[0].rightImg->copyToBuffer(m_rightCpu.data(), count * sizeof(uint32_t));
 }
 
-bool StereoPipeline::uploadAndStitch() { return true; }
-
-bool StereoPipeline::downsampleDisparityGPU(uint32_t fromLevel, uint32_t toLevel) {
+// 下采样：从 fromLevel.disparity 读取，输出到 toLevel.priorDisparity
+bool StereoPipeline::downsamplePriorGPU(uint32_t fromLevel, uint32_t toLevel) {
     auto& from = m_levels[fromLevel];
     auto& to   = m_levels[toLevel];
 
@@ -285,6 +280,38 @@ bool StereoPipeline::downsampleDisparityGPU(uint32_t fromLevel, uint32_t toLevel
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     CHECK(vkBeginCommandBuffer(cmd.buffer, &beginInfo) == VK_SUCCESS, "开始命令缓冲区失败");
 
+    // 关键：动态重新绑定描述符集，将 from.disparity 作为输入，to.priorDisparity 作为输出
+    // 由于我们已经在 createPipelines 中绑定了占位描述符集，这里需要重新绑定正确的缓冲区
+    // 简便方法：为 downsamplePipe 单独创建新的描述符集，或者使用 push descriptor（未实现）
+    // 我们采用重新绑定：临时创建一个描述符集并绑定
+    // 但为了简洁，我们修改 downsamplePipe 的绑定方式：在 createPipelines 中不绑定具体buffer，
+    // 而是在执行时使用 vkCmdPushDescriptorSet（需要Vulkan 1.1+，PanVK可能不支持）
+    // 为了尽快解决问题，我们直接复用现有的描述符集，但需要更新其绑定的缓冲区。
+    // ComputePipeline 没有提供更新描述符集的方法，我们只能重新创建。
+    // 这里我们简单处理：在 createPipelines 中已经绑定了占位 buffer，这里我们假设
+    // downsamplePipe 使用的是 to.disparity 作为输入，但我们需要的是 from.disparity。
+    // 因此，我们需要为 downsamplePipe 创建新的描述符集，但为了不增加复杂度，
+    // 我们修改 createPipelines 中的绑定逻辑：downsamplePipe 绑定两个buffer（输入、输出）均为占位，
+    // 执行时，我们临时创建新的描述符集并绑定（代价略高但每帧只发生 levels-1 次，可接受）。
+    // 快速实现：使用 vkCmdBindDescriptorSets 之前，我们分配一个新的描述符集并更新。
+    // 我们临时添加代码：为 downsamplePipe 创建新的描述符集，绑定 from.disparity 和 to.priorDisparity。
+    // 为了保持简洁，我们简单地在每次执行时重新创建描述符集（开销很小）。
+    
+    std::vector<VkBuffer> bufs = {
+        to.params->getBuffer(),          // binding 0 (uniform)
+        from.disparity->getBuffer(),     // binding 1 (输入)
+        to.temp->getBuffer(),            // binding 2 (未使用)
+        to.disparity->getBuffer(),       // binding 3 (未使用)
+        to.priorDisparity->getBuffer(),  // binding 4 (输出)
+        to.debug->getBuffer()            // binding 5 (调试)
+    };
+    std::vector<VkDescriptorType> types(6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    types[0] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    if (!to.downsamplePipe->createDescriptorSet(bufs, types)) {
+        LOG_ERROR("创建下采样描述符集失败");
+        return false;
+    }
+
     to.downsamplePipe->recordCommands(cmd.buffer, gx, gy, 1, &pushParams, sizeof(pushParams));
 
     CHECK(vkEndCommandBuffer(cmd.buffer) == VK_SUCCESS, "结束命令缓冲区失败");
@@ -300,11 +327,13 @@ bool StereoPipeline::compute() {
     CHECK(m_initialized, "流水线未初始化");
     CHECK(!m_leftCpu.empty() && !m_rightCpu.empty(), "左右图像未设置");
 
+    // 从最粗层开始（顶层无先验，全范围搜索）
     for (int32_t level = static_cast<int32_t>(m_levels.size()) - 1; level >= 0; --level) {
         auto& res = m_levels[level];
 
+        // 如果不是最粗层，将上层视差下采样作为当前层的先验
         if (level != static_cast<int32_t>(m_levels.size()) - 1) {
-            CHECK(downsampleDisparityGPU(level + 1, level), "视差下采样失败");
+            CHECK(downsamplePriorGPU(level + 1, level), "视差下采样失败");
             vkWaitForFences(m_device, 1, &res.downsampleCmd.fence, VK_TRUE, UINT64_MAX);
         }
 
@@ -312,14 +341,11 @@ bool StereoPipeline::compute() {
         uint32_t gy = (res.height + WORKGROUP_Y - 1) / WORKGROUP_Y;
 
         CHECK(executePipeline(*res.censusPipe,    res.censusCmd,    level, gx, gy), "Census 失败");
-        CHECK(executePipeline(*res.costPipe,      res.costCmd,      level, gx, gy), "Cost 失败");
-        CHECK(executePipeline(*res.aggregatePipe, res.aggregateCmd, level, gx, gy), "Aggregate 失败");
-        CHECK(executePipeline(*res.wtaPipe,       res.wtaCmd,       level, gx, gy), "WTA 失败");
+        CHECK(executePipeline(*res.costWtaPipe,   res.costWtaCmd,   level, gx, gy), "CostWTA 失败");
         CHECK(executePipeline(*res.postPipe,      res.postCmd,      level, gx, gy), "Postprocess 失败");
 
-        VkFence fences[] = {res.censusCmd.fence, res.costCmd.fence, res.aggregateCmd.fence,
-                            res.wtaCmd.fence, res.postCmd.fence};
-        vkWaitForFences(m_device, 5, fences, VK_TRUE, UINT64_MAX);
+        VkFence fences[] = {res.censusCmd.fence, res.costWtaCmd.fence, res.postCmd.fence};
+        vkWaitForFences(m_device, 3, fences, VK_TRUE, UINT64_MAX);
     }
 
     LOG_INFO("立体匹配计算完成");
