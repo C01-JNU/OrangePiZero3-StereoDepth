@@ -5,11 +5,14 @@
 #include "vulkan/generated/pyramid_config.hpp"
 #include <memory>
 #include <vector>
+
 namespace stereo_depth::vulkan {
+
 class StereoPipeline {
 public:
     explicit StereoPipeline(const VulkanContext& context);
     ~StereoPipeline();
+
     StereoPipeline(const StereoPipeline&) = delete;
     StereoPipeline& operator=(const StereoPipeline&) = delete;
     StereoPipeline(StereoPipeline&&) = default;
@@ -41,24 +44,22 @@ private:
     struct LevelResources {
         uint32_t width, height, maxDisparity;
 
-        // 缓冲区
+        // 缓冲区（全部使用设备本地内存，Uniform除外）
         std::unique_ptr<BufferManager> leftImg, rightImg;
         std::unique_ptr<BufferManager> leftCensus, rightCensus;
-        std::unique_ptr<BufferManager> disparity;      // 最终视差图
-        std::unique_ptr<BufferManager> priorDisparity; // 先验视差图（来自上层）
-        std::unique_ptr<BufferManager> temp;           // 临时缓冲区
-        std::unique_ptr<BufferManager> params;         // Uniform参数
-        std::unique_ptr<BufferManager> debug;          // 调试缓冲区
+        std::unique_ptr<BufferManager> disparity;
+        std::unique_ptr<BufferManager> priorDisparity;
+        std::unique_ptr<BufferManager> temp;
+        std::unique_ptr<BufferManager> params;   // Uniform，主机可见
+        std::unique_ptr<BufferManager> debug;
 
         VkDescriptorSetLayout layout = VK_NULL_HANDLE;
 
-        // 管线
         std::unique_ptr<ComputePipeline> censusPipe;
-        std::unique_ptr<ComputePipeline> costWtaPipe;   // 合并管线（带先验）
+        std::unique_ptr<ComputePipeline> costWtaPipe;
         std::unique_ptr<ComputePipeline> postPipe;
-        std::unique_ptr<ComputePipeline> downsamplePipe; // 输出到 prior
+        std::unique_ptr<ComputePipeline> downsamplePipe;
 
-        // 命令资源
         struct CmdResources {
             VkCommandPool   pool   = VK_NULL_HANDLE;
             VkCommandBuffer buffer = VK_NULL_HANDLE;
@@ -68,7 +69,7 @@ private:
     };
     std::vector<LevelResources> m_levels;
 
-    // Uniform结构体（56字节，包含searchRadius）
+    // Uniform结构体（56字节）
     struct PipelineParams {
         uint32_t imageWidth, imageHeight, maxDisparity, windowSize;
         float uniquenessRatio, penaltyP1, penaltyP2;
@@ -85,6 +86,7 @@ private:
     bool executePipeline(ComputePipeline& pipe, LevelResources::CmdResources& cmd,
                          uint32_t level, uint32_t gx, uint32_t gy);
     void expand8To32(const uint8_t* src, uint32_t* dst, size_t count);
-    bool downsamplePriorGPU(uint32_t fromLevel, uint32_t toLevel); // 输出到 prior
+    bool downsamplePriorGPU(uint32_t fromLevel, uint32_t toLevel);
 };
+
 } // namespace stereo_depth::vulkan

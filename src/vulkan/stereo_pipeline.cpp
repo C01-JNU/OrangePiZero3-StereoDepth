@@ -3,9 +3,14 @@
 #include "vulkan/generated/pyramid_config.hpp"
 #include <cstring>
 #include <algorithm>
+
 namespace stereo_depth::vulkan {
+
 #define CHECK(expr, msg) do { if (!(expr)) { LOG_ERROR(msg); return false; } } while(0)
 
+// -----------------------------------------------------------------
+// 构造函数 / 析构函数
+// -----------------------------------------------------------------
 StereoPipeline::StereoPipeline(const VulkanContext& context) 
     : m_ctx(context), m_device(context.getDevice()), m_queue(context.getComputeQueue()) {}
 
@@ -29,13 +34,17 @@ StereoPipeline::~StereoPipeline() {
     }
 }
 
+// -----------------------------------------------------------------
+// 初始化
+// -----------------------------------------------------------------
 bool StereoPipeline::initialize() {
     if (m_initialized) return true;
     m_levels.resize(PYRAMID_LEVEL_COUNT);
     m_baseWidth  = PYRAMID_LEVELS[0].width;
     m_baseHeight = PYRAMID_LEVELS[0].height;
     m_leftCpu.clear(); m_rightCpu.clear();
-    LOG_INFO("初始化立体匹配流水线（视差先验传播优化版），金字塔层数: {}", PYRAMID_LEVEL_COUNT);
+
+    LOG_INFO("初始化立体匹配流水线（设备本地内存优化版），金字塔层数: {}", PYRAMID_LEVEL_COUNT);
     for (uint32_t i = 0; i < PYRAMID_LEVEL_COUNT; ++i) {
         LOG_DEBUG("  层{}: {}x{} 视差={} 搜索半径={}", i,
                   PYRAMID_LEVELS[i].width, PYRAMID_LEVELS[i].height,
@@ -47,9 +56,15 @@ bool StereoPipeline::initialize() {
     return true;
 }
 
+// -----------------------------------------------------------------
+// 创建单层资源（全部使用设备本地缓冲区）
+// -----------------------------------------------------------------
 bool StereoPipeline::createLevelResources(uint32_t level, const PyramidLevelParams& params) {
     LevelResources& res = m_levels[level];
-    res.width = params.width; res.height = params.height; res.maxDisparity = params.max_disparity;
+    res.width = params.width; 
+    res.height = params.height; 
+    res.maxDisparity = params.max_disparity;
+
     size_t pixels = static_cast<size_t>(res.width) * res.height;
     size_t imgBytes    = pixels * sizeof(uint32_t);
     size_t censusBytes = pixels * 2 * sizeof(uint32_t);
@@ -57,14 +72,17 @@ bool StereoPipeline::createLevelResources(uint32_t level, const PyramidLevelPara
     size_t debugBytes  = 256 * sizeof(uint32_t);
     size_t paramsBytes = sizeof(PipelineParams);
 
-    auto createStorage = [this](VkDeviceSize size, const char* name) {
+    // 设备本地缓冲区创建辅助函数
+    auto createDeviceLocal = [this](VkDeviceSize size, VkBufferUsageFlags usage, const char* name) {
         auto buf = std::make_unique<BufferManager>(m_ctx);
-        if (!buf->createStorageBuffer(size)) {
-            LOG_ERROR("创建存储缓冲区失败: {}", name);
+        if (!buf->createDeviceLocalBuffer(size, usage)) {
+            LOG_ERROR("创建设备本地缓冲区失败: {}", name);
             return std::unique_ptr<BufferManager>(nullptr);
         }
         return buf;
     };
+
+    // Uniform 缓冲区（主机可见，小数据量）
     auto createUniform = [this](VkDeviceSize size, const char* name) {
         auto buf = std::make_unique<BufferManager>(m_ctx);
         if (!buf->createUniformBuffer(size)) {
@@ -74,19 +92,38 @@ bool StereoPipeline::createLevelResources(uint32_t level, const PyramidLevelPara
         return buf;
     };
 
-    res.leftImg    = createStorage(imgBytes,     "LeftImage");
-    res.rightImg   = createStorage(imgBytes,     "RightImage");
-    res.leftCensus = createStorage(censusBytes,  "LeftCensus");
-    res.rightCensus= createStorage(censusBytes,  "RightCensus");
-    res.disparity  = createStorage(tempBytes,    "Disparity");
-    res.priorDisparity = createStorage(tempBytes, "PriorDisparity"); // 新增先验缓冲区
-    res.temp       = createStorage(tempBytes,    "Temp");
-    res.params     = createUniform(paramsBytes,  "Params");
-    res.debug      = createStorage(debugBytes,   "Debug");
+    // 所有存储缓冲区均使用 DEVICE_LOCAL，并添加 TRANSFER_DST 以便上传数据
+    res.leftImg    = createDeviceLocal(imgBytes, 
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      "LeftImage");
+    res.rightImg   = createDeviceLocal(imgBytes,
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      "RightImage");
+    res.leftCensus = createDeviceLocal(censusBytes,
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      "LeftCensus");
+    res.rightCensus= createDeviceLocal(censusBytes,
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      "RightCensus");
+    res.disparity  = createDeviceLocal(tempBytes,
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                      "Disparity");
+    res.priorDisparity = createDeviceLocal(tempBytes,
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      "PriorDisparity");
+    res.temp       = createDeviceLocal(tempBytes,
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                      "Temp");
+    res.params     = createUniform(paramsBytes, "Params");
+    res.debug      = createDeviceLocal(debugBytes,
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                      "Debug");
+
     if (!res.leftImg || !res.rightImg || !res.leftCensus || !res.rightCensus ||
         !res.disparity || !res.priorDisparity || !res.temp || !res.params || !res.debug)
         return false;
 
+    // 填充 Uniform 参数
     PipelineParams uniformParams = {};
     uniformParams.imageWidth     = res.width;
     uniformParams.imageHeight    = res.height;
@@ -99,8 +136,9 @@ bool StereoPipeline::createLevelResources(uint32_t level, const PyramidLevelPara
     uniformParams.speckleWindow  = params.speckle_window;
     uniformParams.speckleRange   = params.speckle_range;
     uniformParams.medianSize     = params.median_size;
-    uniformParams.searchRadius   = params.search_radius;   // 设置搜索半径
+    uniformParams.searchRadius   = params.search_radius;
     uniformParams.padding[0] = uniformParams.padding[1] = 0;
+    
     CHECK(res.params->copyToBuffer(&uniformParams, sizeof(uniformParams)), "上传Uniform参数失败");
 
     CHECK(createDescriptorSetLayout(res), "创建描述符集布局失败");
@@ -113,6 +151,9 @@ bool StereoPipeline::createLevelResources(uint32_t level, const PyramidLevelPara
     return true;
 }
 
+// -----------------------------------------------------------------
+// 创建描述符集布局（统一6个binding）
+// -----------------------------------------------------------------
 bool StereoPipeline::createDescriptorSetLayout(LevelResources& res) {
     VkDescriptorSetLayoutBinding bindings[6] = {};
     for (uint32_t i = 0; i < 6; ++i) {
@@ -124,12 +165,16 @@ bool StereoPipeline::createDescriptorSetLayout(LevelResources& res) {
     }
     VkDescriptorSetLayoutCreateInfo info = {};
     info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    info.bindingCount = 6; info.pBindings = bindings;
+    info.bindingCount = 6;
+    info.pBindings = bindings;
     CHECK(vkCreateDescriptorSetLayout(m_device, &info, nullptr, &res.layout) == VK_SUCCESS,
           "创建描述符集布局失败");
     return true;
 }
 
+// -----------------------------------------------------------------
+// 创建管线及描述符集（绑定设备本地缓冲区）
+// -----------------------------------------------------------------
 bool StereoPipeline::createPipelines(LevelResources& res, uint32_t level) {
     res.censusPipe    = std::make_unique<ComputePipeline>(m_ctx);
     res.costWtaPipe   = std::make_unique<ComputePipeline>(m_ctx);
@@ -151,7 +196,7 @@ bool StereoPipeline::createPipelines(LevelResources& res, uint32_t level) {
     CHECK(res.postPipe->createPipeline(0),      "创建 Postprocess 管线失败");
     CHECK(res.downsamplePipe->createPipeline(16), "创建 Downsample 管线失败");
 
-    // 辅助lambda：绑定6个buffer，类型自动设置
+    // 绑定描述符集辅助函数
     auto bindBuffers = [&](ComputePipeline& pipe,
                            VkBuffer b1, VkBuffer b2, VkBuffer b3, VkBuffer b4) -> bool {
         std::vector<VkBuffer> bufs = {
@@ -167,18 +212,17 @@ bool StereoPipeline::createPipelines(LevelResources& res, uint32_t level) {
         res.leftImg->getBuffer(), res.rightImg->getBuffer(),
         res.leftCensus->getBuffer(), res.rightCensus->getBuffer()), "Census 描述符集失败");
 
-    // CostWTA: binding1=左Census, binding2=右Census, binding3=视差图输出, binding4=先验视差图
+    // CostWTA: binding1=左Census, binding2=右Census, binding3=视差图, binding4=先验视差图
     CHECK(bindBuffers(*res.costWtaPipe,
         res.leftCensus->getBuffer(), res.rightCensus->getBuffer(),
         res.disparity->getBuffer(), res.priorDisparity->getBuffer()), "CostWTA 描述符集失败");
 
-    // Postprocess: 输入视差图(binding1) -> 输出视差图(binding3)，原位更新
+    // Postprocess: 输入(binding1) = 视差图, 输出(binding3) = 视差图（原位更新）
     CHECK(bindBuffers(*res.postPipe,
         res.disparity->getBuffer(), res.temp->getBuffer(),
         res.disparity->getBuffer(), res.temp->getBuffer()), "Postprocess 描述符集失败");
 
-    // Downsample: binding1=上层视差图(调用时指定from.disparity), binding4=输出当前层先验
-    // 这里绑定占位，实际执行时动态绑定不同层的buffer
+    // Downsample: 绑定占位，实际执行时重新绑定（因为输入来自上层）
     CHECK(bindBuffers(*res.downsamplePipe,
         res.disparity->getBuffer(), res.temp->getBuffer(),
         res.disparity->getBuffer(), res.priorDisparity->getBuffer()), "Downsample 描述符集失败");
@@ -186,6 +230,9 @@ bool StereoPipeline::createPipelines(LevelResources& res, uint32_t level) {
     return true;
 }
 
+// -----------------------------------------------------------------
+// 创建命令池/缓冲/Fence（复用）
+// -----------------------------------------------------------------
 bool StereoPipeline::createCmdResources(LevelResources::CmdResources& cmd) {
     VkCommandPoolCreateInfo poolInfo = {};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -210,6 +257,9 @@ bool StereoPipeline::createCmdResources(LevelResources::CmdResources& cmd) {
     return true;
 }
 
+// -----------------------------------------------------------------
+// 加载着色器（带层后缀）
+// -----------------------------------------------------------------
 bool StereoPipeline::loadShader(ComputePipeline& pipe, const std::string& name, uint32_t level) {
     std::string spvFile = "src/vulkan/spv/" + name + "_layer" + std::to_string(level) + ".comp.spv";
     if (pipe.loadShaderFromFile(spvFile)) {
@@ -220,6 +270,9 @@ bool StereoPipeline::loadShader(ComputePipeline& pipe, const std::string& name, 
     return false;
 }
 
+// -----------------------------------------------------------------
+// 执行单个管线（复用命令缓冲）
+// -----------------------------------------------------------------
 bool StereoPipeline::executePipeline(ComputePipeline& pipe, LevelResources::CmdResources& cmd,
                                      uint32_t level, uint32_t gx, uint32_t gy) {
     vkWaitForFences(m_device, 1, &cmd.fence, VK_TRUE, UINT64_MAX);
@@ -239,16 +292,22 @@ bool StereoPipeline::executePipeline(ComputePipeline& pipe, LevelResources::CmdR
     return true;
 }
 
+// -----------------------------------------------------------------
+// 8位扩展32位（CPU端）
+// -----------------------------------------------------------------
 void StereoPipeline::expand8To32(const uint8_t* src, uint32_t* dst, size_t count) {
     for (size_t i = 0; i < count; ++i) dst[i] = static_cast<uint32_t>(src[i]);
 }
 
+// -----------------------------------------------------------------
+// 设置左图像（使用暂存缓冲上传到设备本地）
+// -----------------------------------------------------------------
 bool StereoPipeline::setLeftImage(const uint8_t* data) {
     CHECK(m_initialized, "流水线未初始化");
     size_t count = static_cast<size_t>(m_baseWidth) * m_baseHeight;
     m_leftCpu.resize(count);
     expand8To32(data, m_leftCpu.data(), count);
-    return m_levels[0].leftImg->copyToBuffer(m_leftCpu.data(), count * sizeof(uint32_t));
+    return m_levels[0].leftImg->copyToDevice(m_leftCpu.data(), count * sizeof(uint32_t));
 }
 
 bool StereoPipeline::setRightImage(const uint8_t* data) {
@@ -256,10 +315,12 @@ bool StereoPipeline::setRightImage(const uint8_t* data) {
     size_t count = static_cast<size_t>(m_baseWidth) * m_baseHeight;
     m_rightCpu.resize(count);
     expand8To32(data, m_rightCpu.data(), count);
-    return m_levels[0].rightImg->copyToBuffer(m_rightCpu.data(), count * sizeof(uint32_t));
+    return m_levels[0].rightImg->copyToDevice(m_rightCpu.data(), count * sizeof(uint32_t));
 }
 
-// 下采样：从 fromLevel.disparity 读取，输出到 toLevel.priorDisparity
+// -----------------------------------------------------------------
+// 下采样：将上层视差图作为先验，输出到当前层的 priorDisparity
+// -----------------------------------------------------------------
 bool StereoPipeline::downsamplePriorGPU(uint32_t fromLevel, uint32_t toLevel) {
     auto& from = m_levels[fromLevel];
     auto& to   = m_levels[toLevel];
@@ -280,30 +341,14 @@ bool StereoPipeline::downsamplePriorGPU(uint32_t fromLevel, uint32_t toLevel) {
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     CHECK(vkBeginCommandBuffer(cmd.buffer, &beginInfo) == VK_SUCCESS, "开始命令缓冲区失败");
 
-    // 关键：动态重新绑定描述符集，将 from.disparity 作为输入，to.priorDisparity 作为输出
-    // 由于我们已经在 createPipelines 中绑定了占位描述符集，这里需要重新绑定正确的缓冲区
-    // 简便方法：为 downsamplePipe 单独创建新的描述符集，或者使用 push descriptor（未实现）
-    // 我们采用重新绑定：临时创建一个描述符集并绑定
-    // 但为了简洁，我们修改 downsamplePipe 的绑定方式：在 createPipelines 中不绑定具体buffer，
-    // 而是在执行时使用 vkCmdPushDescriptorSet（需要Vulkan 1.1+，PanVK可能不支持）
-    // 为了尽快解决问题，我们直接复用现有的描述符集，但需要更新其绑定的缓冲区。
-    // ComputePipeline 没有提供更新描述符集的方法，我们只能重新创建。
-    // 这里我们简单处理：在 createPipelines 中已经绑定了占位 buffer，这里我们假设
-    // downsamplePipe 使用的是 to.disparity 作为输入，但我们需要的是 from.disparity。
-    // 因此，我们需要为 downsamplePipe 创建新的描述符集，但为了不增加复杂度，
-    // 我们修改 createPipelines 中的绑定逻辑：downsamplePipe 绑定两个buffer（输入、输出）均为占位，
-    // 执行时，我们临时创建新的描述符集并绑定（代价略高但每帧只发生 levels-1 次，可接受）。
-    // 快速实现：使用 vkCmdBindDescriptorSets 之前，我们分配一个新的描述符集并更新。
-    // 我们临时添加代码：为 downsamplePipe 创建新的描述符集，绑定 from.disparity 和 to.priorDisparity。
-    // 为了保持简洁，我们简单地在每次执行时重新创建描述符集（开销很小）。
-    
+    // 动态绑定：输入 = from.disparity，输出 = to.priorDisparity
     std::vector<VkBuffer> bufs = {
-        to.params->getBuffer(),          // binding 0 (uniform)
+        to.params->getBuffer(),          // binding 0
         from.disparity->getBuffer(),     // binding 1 (输入)
         to.temp->getBuffer(),            // binding 2 (未使用)
         to.disparity->getBuffer(),       // binding 3 (未使用)
         to.priorDisparity->getBuffer(),  // binding 4 (输出)
-        to.debug->getBuffer()            // binding 5 (调试)
+        to.debug->getBuffer()            // binding 5
     };
     std::vector<VkDescriptorType> types(6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
     types[0] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -323,15 +368,16 @@ bool StereoPipeline::downsamplePriorGPU(uint32_t fromLevel, uint32_t toLevel) {
     return true;
 }
 
+// -----------------------------------------------------------------
+// 主计算流程（从粗到细）
+// -----------------------------------------------------------------
 bool StereoPipeline::compute() {
     CHECK(m_initialized, "流水线未初始化");
     CHECK(!m_leftCpu.empty() && !m_rightCpu.empty(), "左右图像未设置");
 
-    // 从最粗层开始（顶层无先验，全范围搜索）
     for (int32_t level = static_cast<int32_t>(m_levels.size()) - 1; level >= 0; --level) {
         auto& res = m_levels[level];
 
-        // 如果不是最粗层，将上层视差下采样作为当前层的先验
         if (level != static_cast<int32_t>(m_levels.size()) - 1) {
             CHECK(downsamplePriorGPU(level + 1, level), "视差下采样失败");
             vkWaitForFences(m_device, 1, &res.downsampleCmd.fence, VK_TRUE, UINT64_MAX);
@@ -352,12 +398,15 @@ bool StereoPipeline::compute() {
     return true;
 }
 
+// -----------------------------------------------------------------
+// 获取视差图（从设备本地缓冲区下载）
+// -----------------------------------------------------------------
 bool StereoPipeline::getDisparityMap(uint16_t* output) {
     CHECK(m_initialized && !m_levels.empty(), "流水线未初始化");
     auto& res = m_levels[0];
     size_t pixels = static_cast<size_t>(res.width) * res.height;
     std::vector<uint32_t> gpuDisp(pixels);
-    CHECK(res.disparity->copyFromBuffer(gpuDisp.data(), pixels * sizeof(uint32_t)),
+    CHECK(res.disparity->copyFromDevice(gpuDisp.data(), pixels * sizeof(uint32_t)),
           "从GPU读取视差图失败");
     for (size_t i = 0; i < pixels; ++i) {
         uint32_t val = gpuDisp[i];
@@ -366,11 +415,15 @@ bool StereoPipeline::getDisparityMap(uint16_t* output) {
     return true;
 }
 
+// -----------------------------------------------------------------
+// 获取调试缓冲区（直接从设备本地读回）
+// -----------------------------------------------------------------
 bool StereoPipeline::getDebugBuffer(uint32_t level, uint32_t stage, void* output, size_t size) {
     CHECK(level < m_levels.size(), "无效层索引");
     auto& res = m_levels[level];
     BufferManager* dbg = res.debug.get();
     CHECK(dbg && dbg->isValid(), "调试缓冲区无效");
-    return dbg->copyFromBuffer(output, std::min(size, dbg->getSize()));
+    return dbg->copyFromDevice(output, std::min(size, dbg->getSize()));
 }
+
 } // namespace stereo_depth::vulkan

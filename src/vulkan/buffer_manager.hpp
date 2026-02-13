@@ -9,160 +9,59 @@ namespace stereo_depth {
 namespace vulkan {
 
 /**
- * @brief 缓冲区管理器类，用于管理Vulkan缓冲区
- * 
- * 按照RAII原则管理缓冲区生命周期
+ * @brief 缓冲区管理器，封装 Vulkan 缓冲区和设备内存
+ *        支持设备本地（DEVICE_LOCAL）和主机可见（HOST_VISIBLE）两种类型
  */
 class BufferManager {
 public:
-    BufferManager() = delete;
-    BufferManager(const VulkanContext& context);
+    explicit BufferManager(const VulkanContext& context);
     ~BufferManager();
-    
-    // 禁止拷贝
+
+    // 禁止拷贝，允许移动
     BufferManager(const BufferManager&) = delete;
     BufferManager& operator=(const BufferManager&) = delete;
-    
-    // 允许移动
     BufferManager(BufferManager&& other) noexcept;
     BufferManager& operator=(BufferManager&& other) noexcept;
-    
-    /**
-     * @brief 创建存储缓冲区
-     * @param size 缓冲区大小（字节）
-     * @param usage 额外使用标志
-     * @return 是否创建成功
-     */
-    bool createStorageBuffer(VkDeviceSize size, VkBufferUsageFlags usage = 0);
-    
-    /**
-     * @brief 创建Uniform缓冲区
-     * @param size 缓冲区大小（字节）
-     * @return 是否创建成功
-     */
-    bool createUniformBuffer(VkDeviceSize size);
-    
-    /**
-     * @brief 创建暂存缓冲区（用于CPU到GPU数据传输）
-     * @param size 缓冲区大小（字节）
-     * @return 是否创建成功
-     */
-    bool createStagingBuffer(VkDeviceSize size);
-    
-    /**
-     * @brief 获取缓冲区句柄
-     */
-    VkBuffer getBuffer() const { return m_buffer; }
-    
-    /**
-     * @brief 获取缓冲区内存
-     */
-    VkDeviceMemory getMemory() const { return m_memory; }
-    
-    /**
-     * @brief 获取缓冲区大小
-     */
-    VkDeviceSize getSize() const { return m_size; }
-    
-    /**
-     * @brief 映射缓冲区内存到CPU地址空间
-     * @return 映射后的指针，失败返回nullptr
-     */
-    void* map();
-    
-    /**
-     * @brief 取消映射缓冲区内存
-     */
-    void unmap();
-    
-    /**
-     * @brief 复制数据到缓冲区
-     * @param data 源数据指针
-     * @param size 数据大小（字节）
-     * @param offset 缓冲区偏移量
-     * @return 是否复制成功
-     */
-    bool copyToBuffer(const void* data, VkDeviceSize size, VkDeviceSize offset = 0);
-    
-    /**
-     * @brief 从缓冲区复制数据
-     * @param data 目标数据指针
-     * @param size 数据大小（字节）
-     * @param offset 缓冲区偏移量
-     * @return 是否复制成功
-     */
-    bool copyFromBuffer(void* data, VkDeviceSize size, VkDeviceSize offset = 0);
-    
-    /**
-     * @brief 清空缓冲区（填充0）
-     * @param size 要清空的大小，0表示整个缓冲区
-     */
-    void clear(VkDeviceSize size = 0);
-    
-    /**
-     * @brief 检查缓冲区是否有效
-     */
-    bool isValid() const { return m_buffer != VK_NULL_HANDLE; }
-    
-private:
-    const VulkanContext& m_context;
-    VkBuffer m_buffer = VK_NULL_HANDLE;
-    VkDeviceMemory m_memory = VK_NULL_HANDLE;
-    VkDeviceSize m_size = 0;
-    VkBufferUsageFlags m_usage = 0;
-    VkMemoryPropertyFlags m_memoryProperties = 0;
-    void* m_mapped = nullptr;
-    
-    void cleanup();
-};
 
-/**
- * @brief 描述符集布局构建器，用于创建描述符集布局
- */
-class DescriptorSetLayoutBuilder {
-public:
-    DescriptorSetLayoutBuilder(const VulkanContext& context);
-    ~DescriptorSetLayoutBuilder();
+    // ---------- 设备本地缓冲区（GPU 专用，性能最优）----------
+    bool createDeviceLocalBuffer(VkDeviceSize size, VkBufferUsageFlags usage);
     
-    // 禁止拷贝，允许移动
-    DescriptorSetLayoutBuilder(const DescriptorSetLayoutBuilder&) = delete;
-    DescriptorSetLayoutBuilder& operator=(const DescriptorSetLayoutBuilder&) = delete;
-    DescriptorSetLayoutBuilder(DescriptorSetLayoutBuilder&&) = default;
-    DescriptorSetLayoutBuilder& operator=(DescriptorSetLayoutBuilder&&) = default;
+    // ---------- 主机可见缓冲区（用于上传/下载暂存）----------
+    bool createStagingBuffer(VkDeviceSize size, VkBufferUsageFlags usage);
+
+    // ---------- Uniform 缓冲区（主机可见，用于小数据量参数）----------
+    bool createUniformBuffer(VkDeviceSize size);
+
+    // ---------- 数据上传/下载（通过暂存缓冲区）----------
+    // 从 CPU 内存拷贝到设备本地缓冲区（阻塞，等待完成）
+    bool copyToDevice(const void* data, VkDeviceSize size);
     
-    /**
-     * @brief 添加存储缓冲区绑定
-     * @param binding 绑定编号
-     * @param count 描述符数量（数组大小）
-     * @param stages 使用着色器阶段
-     */
-    DescriptorSetLayoutBuilder& addStorageBuffer(
-        uint32_t binding, 
-        uint32_t count = 1,
-        VkShaderStageFlags stages = VK_SHADER_STAGE_COMPUTE_BIT
-    );
-    
-    /**
-     * @brief 添加Uniform缓冲区绑定
-     * @param binding 绑定编号
-     * @param count 描述符数量（数组大小）
-     * @param stages 使用着色器阶段
-     */
-    DescriptorSetLayoutBuilder& addUniformBuffer(
-        uint32_t binding, 
-        uint32_t count = 1,
-        VkShaderStageFlags stages = VK_SHADER_STAGE_COMPUTE_BIT
-    );
-    
-    /**
-     * @brief 构建描述符集布局
-     * @return 创建的描述符集布局，失败返回VK_NULL_HANDLE
-     */
-    VkDescriptorSetLayout build();
-    
+    // 从设备本地缓冲区拷贝到 CPU 内存（阻塞，等待完成）
+    bool copyFromDevice(void* data, VkDeviceSize size);
+
+    // ---------- 直接映射访问（仅对 HOST_VISIBLE 缓冲区有效）----------
+    bool copyToBuffer(const void* data, VkDeviceSize size);
+    bool copyFromBuffer(void* data, VkDeviceSize size);
+
+    // 获取 Vulkan 对象
+    VkBuffer getBuffer() const { return buffer_; }
+    VkDeviceMemory getMemory() const { return memory_; }
+    VkDeviceSize getSize() const { return size_; }
+    bool isValid() const { return buffer_ != VK_NULL_HANDLE && memory_ != VK_NULL_HANDLE; }
+
+    // 显式释放资源
+    void release();
+
 private:
-    const VulkanContext& m_context;
-    std::vector<VkDescriptorSetLayoutBinding> m_bindings;
+    const VulkanContext& m_ctx;
+    VkDevice m_device;
+
+    VkBuffer buffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory memory_ = VK_NULL_HANDLE;
+    VkDeviceSize size_ = 0;
+    bool is_host_visible_ = false;   // 标记是否为 HOST_VISIBLE，用于映射
+
+    void cleanup();
 };
 
 } // namespace vulkan

@@ -1,14 +1,13 @@
 #include "vulkan/buffer_manager.hpp"
 #include "utils/logger.hpp"
 #include <cstring>
-#include <stdexcept>
 
 namespace stereo_depth {
 namespace vulkan {
 
-// BufferManager实现
 BufferManager::BufferManager(const VulkanContext& context)
-    : m_context(context) {
+    : m_ctx(context)
+    , m_device(context.getDevice()) {
 }
 
 BufferManager::~BufferManager() {
@@ -16,291 +15,192 @@ BufferManager::~BufferManager() {
 }
 
 BufferManager::BufferManager(BufferManager&& other) noexcept
-    : m_context(other.m_context)
-    , m_buffer(other.m_buffer)
-    , m_memory(other.m_memory)
-    , m_size(other.m_size)
-    , m_usage(other.m_usage)
-    , m_memoryProperties(other.m_memoryProperties)
-    , m_mapped(other.m_mapped) {
-    other.m_buffer = VK_NULL_HANDLE;
-    other.m_memory = VK_NULL_HANDLE;
-    other.m_mapped = nullptr;
-    other.m_size = 0;
+    : m_ctx(other.m_ctx)
+    , m_device(other.m_device)
+    , buffer_(other.buffer_)
+    , memory_(other.memory_)
+    , size_(other.size_)
+    , is_host_visible_(other.is_host_visible_) {
+    other.buffer_ = VK_NULL_HANDLE;
+    other.memory_ = VK_NULL_HANDLE;
+    other.size_ = 0;
 }
 
 BufferManager& BufferManager::operator=(BufferManager&& other) noexcept {
     if (this != &other) {
         cleanup();
-        m_buffer = other.m_buffer;
-        m_memory = other.m_memory;
-        m_size = other.m_size;
-        m_usage = other.m_usage;
-        m_memoryProperties = other.m_memoryProperties;
-        m_mapped = other.m_mapped;
-        
-        other.m_buffer = VK_NULL_HANDLE;
-        other.m_memory = VK_NULL_HANDLE;
-        other.m_mapped = nullptr;
-        other.m_size = 0;
+        m_device = other.m_device;
+        buffer_ = other.buffer_;
+        memory_ = other.memory_;
+        size_ = other.size_;
+        is_host_visible_ = other.is_host_visible_;
+        other.buffer_ = VK_NULL_HANDLE;
+        other.memory_ = VK_NULL_HANDLE;
+        other.size_ = 0;
     }
     return *this;
 }
 
-bool BufferManager::createStorageBuffer(VkDeviceSize size, VkBufferUsageFlags usage) {
+bool BufferManager::createDeviceLocalBuffer(VkDeviceSize size, VkBufferUsageFlags usage) {
     if (isValid()) {
-        LOG_WARN("Buffer already exists, cleaning up first");
+        LOG_WARN("缓冲区已存在，将先释放旧资源");
         cleanup();
     }
-    
-    m_size = size;
-    m_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | usage;
-    m_memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | 
-                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    
-    if (!m_context.createBuffer(m_size, m_usage, m_memoryProperties, m_buffer, m_memory)) {
-        LOG_ERROR("Failed to create storage buffer of size {}", m_size);
-        cleanup();
+
+    // 设备本地缓冲区，不需要 HOST_VISIBLE
+    if (!m_ctx.createDeviceLocalBuffer(size, usage, buffer_, memory_)) {
+        LOG_ERROR("创建设备本地缓冲区失败");
         return false;
     }
-    
-    LOG_DEBUG("Created storage buffer: size={} bytes, usage={:#x}", 
-              m_size, m_usage);
+
+    size_ = size;
+    is_host_visible_ = false;
+    LOG_DEBUG("创建设备本地缓冲区: {} 字节, 用途 {}", size, usage);
+    return true;
+}
+
+bool BufferManager::createStagingBuffer(VkDeviceSize size, VkBufferUsageFlags usage) {
+    if (isValid()) {
+        cleanup();
+    }
+
+    if (!m_ctx.createStagingBuffer(size, usage, buffer_, memory_)) {
+        LOG_ERROR("创建暂存缓冲区失败");
+        return false;
+    }
+
+    size_ = size;
+    is_host_visible_ = true;
+    LOG_DEBUG("创建暂存缓冲区: {} 字节, 用途 {}", size, usage);
     return true;
 }
 
 bool BufferManager::createUniformBuffer(VkDeviceSize size) {
     if (isValid()) {
-        LOG_WARN("Buffer already exists, cleaning up first");
         cleanup();
     }
-    
-    m_size = size;
-    m_usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-    m_memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | 
-                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    
-    if (!m_context.createBuffer(m_size, m_usage, m_memoryProperties, m_buffer, m_memory)) {
-        LOG_ERROR("Failed to create uniform buffer of size {}", m_size);
-        cleanup();
+
+    // Uniform 缓冲区通常使用 HOST_VISIBLE | HOST_COHERENT
+    if (!m_ctx.createBuffer(size,
+                            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            buffer_,
+                            memory_)) {
+        LOG_ERROR("创建 Uniform 缓冲区失败");
         return false;
     }
-    
-    LOG_DEBUG("Created uniform buffer: size={} bytes", m_size);
+
+    size_ = size;
+    is_host_visible_ = true;
+    LOG_DEBUG("创建 Uniform 缓冲区: {} 字节", size);
     return true;
 }
 
-bool BufferManager::createStagingBuffer(VkDeviceSize size) {
-    if (isValid()) {
-        LOG_WARN("Buffer already exists, cleaning up first");
-        cleanup();
-    }
-    
-    m_size = size;
-    m_usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    m_memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | 
-                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    
-    if (!m_context.createBuffer(m_size, m_usage, m_memoryProperties, m_buffer, m_memory)) {
-        LOG_ERROR("Failed to create staging buffer of size {}", m_size);
-        cleanup();
+bool BufferManager::copyToDevice(const void* data, VkDeviceSize size) {
+    if (!isValid() || size > size_) {
+        LOG_ERROR("缓冲区无效或数据过大");
         return false;
     }
-    
-    LOG_DEBUG("Created staging buffer: size={} bytes", m_size);
+
+    if (is_host_visible_) {
+        // 如果本身就是 HOST_VISIBLE，直接映射拷贝（回退，但不应使用）
+        return copyToBuffer(data, size);
+    }
+
+    // 创建临时暂存缓冲区
+    BufferManager staging(m_ctx);
+    if (!staging.createStagingBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+        LOG_ERROR("创建暂存缓冲区失败");
+        return false;
+    }
+
+    // 将数据拷贝到暂存缓冲区
+    if (!staging.copyToBuffer(data, size)) {
+        LOG_ERROR("拷贝数据到暂存缓冲区失败");
+        return false;
+    }
+
+    // 执行 GPU 复制：暂存缓冲区 -> 设备本地缓冲区
+    m_ctx.copyBuffer(staging.getBuffer(), buffer_, size);
     return true;
 }
 
-void* BufferManager::map() {
-    if (!isValid()) {
-        LOG_ERROR("Cannot map invalid buffer");
-        return nullptr;
+bool BufferManager::copyFromDevice(void* data, VkDeviceSize size) {
+    if (!isValid() || size > size_) {
+        LOG_ERROR("缓冲区无效或数据过大");
+        return false;
     }
-    
-    if (m_mapped != nullptr) {
-        LOG_WARN("Buffer already mapped");
-        return m_mapped;
+
+    if (is_host_visible_) {
+        return copyFromBuffer(data, size);
     }
-    
-    VkDevice device = m_context.getDevice();
-    VkResult result = vkMapMemory(device, m_memory, 0, m_size, 0, &m_mapped);
-    
+
+    BufferManager staging(m_ctx);
+    if (!staging.createStagingBuffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+        LOG_ERROR("创建暂存缓冲区失败");
+        return false;
+    }
+
+    // 执行 GPU 复制：设备本地缓冲区 -> 暂存缓冲区
+    m_ctx.copyBuffer(buffer_, staging.getBuffer(), size);
+
+    // 从暂存缓冲区映射读取
+    return staging.copyFromBuffer(data, size);
+}
+
+bool BufferManager::copyToBuffer(const void* data, VkDeviceSize size) {
+    if (!isValid() || size > size_ || !is_host_visible_) {
+        LOG_ERROR("缓冲区无效、数据过大或非主机可见");
+        return false;
+    }
+
+    void* mapped = nullptr;
+    VkResult result = vkMapMemory(m_device, memory_, 0, size, 0, &mapped);
     if (result != VK_SUCCESS) {
-        LOG_ERROR("Failed to map buffer memory: {}", result);
-        m_mapped = nullptr;
-        return nullptr;
+        LOG_ERROR("映射内存失败: {}", result);
+        return false;
     }
-    
-    return m_mapped;
-}
 
-void BufferManager::unmap() {
-    if (!isValid() || m_mapped == nullptr) {
-        return;
-    }
-    
-    VkDevice device = m_context.getDevice();
-    vkUnmapMemory(device, m_memory);
-    m_mapped = nullptr;
-}
+    memcpy(mapped, data, static_cast<size_t>(size));
 
-bool BufferManager::copyToBuffer(const void* data, VkDeviceSize size, VkDeviceSize offset) {
-    if (!isValid()) {
-        LOG_ERROR("Cannot copy to invalid buffer");
-        return false;
-    }
-    
-    if (size == 0) {
-        size = m_size;
-    }
-    
-    if (offset + size > m_size) {
-        LOG_ERROR("Copy exceeds buffer bounds: offset={}, size={}, buffer size={}", 
-                  offset, size, m_size);
-        return false;
-    }
-    
-    void* mapped = map();
-    if (mapped == nullptr) {
-        return false;
-    }
-    
-    std::memcpy(static_cast<char*>(mapped) + offset, data, size);
-    unmap();
-    
+    // 如果不使用 HOST_COHERENT，需要手动刷新，但我们创建时已指定 COHERENT
+    vkUnmapMemory(m_device, memory_);
     return true;
 }
 
-bool BufferManager::copyFromBuffer(void* data, VkDeviceSize size, VkDeviceSize offset) {
-    if (!isValid()) {
-        LOG_ERROR("Cannot copy from invalid buffer");
+bool BufferManager::copyFromBuffer(void* data, VkDeviceSize size) {
+    if (!isValid() || size > size_ || !is_host_visible_) {
+        LOG_ERROR("缓冲区无效、数据过大或非主机可见");
         return false;
     }
-    
-    if (size == 0) {
-        size = m_size;
-    }
-    
-    if (offset + size > m_size) {
-        LOG_ERROR("Copy exceeds buffer bounds: offset={}, size={}, buffer size={}", 
-                  offset, size, m_size);
+
+    void* mapped = nullptr;
+    VkResult result = vkMapMemory(m_device, memory_, 0, size, 0, &mapped);
+    if (result != VK_SUCCESS) {
+        LOG_ERROR("映射内存失败: {}", result);
         return false;
     }
-    
-    void* mapped = map();
-    if (mapped == nullptr) {
-        return false;
-    }
-    
-    std::memcpy(data, static_cast<char*>(mapped) + offset, size);
-    unmap();
-    
+
+    memcpy(data, mapped, static_cast<size_t>(size));
+    vkUnmapMemory(m_device, memory_);
     return true;
 }
 
-void BufferManager::clear(VkDeviceSize size) {
-    if (!isValid()) {
-        return;
-    }
-    
-    if (size == 0) {
-        size = m_size;
-    }
-    
-    void* mapped = map();
-    if (mapped) {
-        std::memset(mapped, 0, size);
-        unmap();
-    }
+void BufferManager::release() {
+    cleanup();
 }
 
 void BufferManager::cleanup() {
-    if (!isValid()) {
-        return;
+    if (memory_ != VK_NULL_HANDLE) {
+        vkFreeMemory(m_device, memory_, nullptr);
+        memory_ = VK_NULL_HANDLE;
     }
-    
-    VkDevice device = m_context.getDevice();
-    
-    if (m_mapped != nullptr) {
-        unmap();
+    if (buffer_ != VK_NULL_HANDLE) {
+        vkDestroyBuffer(m_device, buffer_, nullptr);
+        buffer_ = VK_NULL_HANDLE;
     }
-    
-    if (m_buffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, m_buffer, nullptr);
-        m_buffer = VK_NULL_HANDLE;
-    }
-    
-    if (m_memory != VK_NULL_HANDLE) {
-        vkFreeMemory(device, m_memory, nullptr);
-        m_memory = VK_NULL_HANDLE;
-    }
-    
-    m_size = 0;
-    m_usage = 0;
-    m_memoryProperties = 0;
-}
-
-// DescriptorSetLayoutBuilder实现
-DescriptorSetLayoutBuilder::DescriptorSetLayoutBuilder(const VulkanContext& context)
-    : m_context(context) {
-}
-
-DescriptorSetLayoutBuilder::~DescriptorSetLayoutBuilder() = default;
-
-DescriptorSetLayoutBuilder& DescriptorSetLayoutBuilder::addStorageBuffer(
-    uint32_t binding, 
-    uint32_t count,
-    VkShaderStageFlags stages) {
-    
-    VkDescriptorSetLayoutBinding layoutBinding = {};
-    layoutBinding.binding = binding;
-    layoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    layoutBinding.descriptorCount = count;
-    layoutBinding.stageFlags = stages;
-    layoutBinding.pImmutableSamplers = nullptr;
-    
-    m_bindings.push_back(layoutBinding);
-    return *this;
-}
-
-DescriptorSetLayoutBuilder& DescriptorSetLayoutBuilder::addUniformBuffer(
-    uint32_t binding, 
-    uint32_t count,
-    VkShaderStageFlags stages) {
-    
-    VkDescriptorSetLayoutBinding layoutBinding = {};
-    layoutBinding.binding = binding;
-    layoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    layoutBinding.descriptorCount = count;
-    layoutBinding.stageFlags = stages;
-    layoutBinding.pImmutableSamplers = nullptr;
-    
-    m_bindings.push_back(layoutBinding);
-    return *this;
-}
-
-VkDescriptorSetLayout DescriptorSetLayoutBuilder::build() {
-    if (m_bindings.empty()) {
-        LOG_WARN("No bindings specified for descriptor set layout");
-        return VK_NULL_HANDLE;
-    }
-    
-    VkDevice device = m_context.getDevice();
-    VkDescriptorSetLayoutCreateInfo layoutInfo = {};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = static_cast<uint32_t>(m_bindings.size());
-    layoutInfo.pBindings = m_bindings.data();
-    
-    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
-    VkResult result = vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &layout);
-    
-    if (result != VK_SUCCESS) {
-        LOG_ERROR("Failed to create descriptor set layout: {}", result);
-        return VK_NULL_HANDLE;
-    }
-    
-    LOG_DEBUG("Created descriptor set layout with {} bindings", m_bindings.size());
-    return layout;
+    size_ = 0;
+    is_host_visible_ = false;
 }
 
 } // namespace vulkan

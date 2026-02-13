@@ -9,20 +9,17 @@
 namespace stereo_depth {
 namespace vulkan {
 
-// Vulkan上下文类，使用Vulkan C API，暂时不使用VMA
 class VulkanContext {
 public:
     VulkanContext();
     ~VulkanContext();
     
-    // 禁止拷贝
     VulkanContext(const VulkanContext&) = delete;
     VulkanContext& operator=(const VulkanContext&) = delete;
     
-    // 初始化Vulkan环境
     bool initialize(bool enable_validation = false);
     
-    // 获取Vulkan对象
+    // 获取 Vulkan 对象
     VkInstance getInstance() const { return instance_; }
     VkPhysicalDevice getPhysicalDevice() const { return physical_device_; }
     VkDevice getDevice() const { return device_; }
@@ -33,55 +30,62 @@ public:
     VkCommandPool createCommandPool(VkCommandPoolCreateFlags flags = 0) const;
     VkCommandBuffer createCommandBuffer(VkCommandPool pool) const;
     
-    // 等待设备空闲
     void waitIdle() const;
     
-    // 获取设备信息
     std::string getDeviceName() const;
     std::string getVulkanVersion() const;
     
-    // 检查扩展支持
     bool checkDeviceExtensionSupport(const std::vector<const char*>& extensions) const;
     
-    // 创建缓冲区（不使用VMA的简单实现）
-    bool createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, 
-                      VkBuffer& buffer, VkDeviceMemory& bufferMemory) const;
+    // ---------- 缓冲区创建接口（内存类型显式指定）----------
+    // 通用缓冲区创建（需指定内存属性）
+    bool createBuffer(VkDeviceSize size,
+                      VkBufferUsageFlags usage,
+                      VkMemoryPropertyFlags properties,
+                      VkBuffer& buffer,
+                      VkDeviceMemory& memory) const;
     
-    // 复制缓冲区
-    void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) const;
+    // 设备本地缓冲区（GPU 专用，高性能）
+    inline bool createDeviceLocalBuffer(VkDeviceSize size,
+                                        VkBufferUsageFlags usage,
+                                        VkBuffer& buffer,
+                                        VkDeviceMemory& memory) const {
+        return createBuffer(size, usage,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            buffer, memory);
+    }
+    
+    // 主机可见缓冲区（用于暂存上传/下载）
+    inline bool createStagingBuffer(VkDeviceSize size,
+                                    VkBufferUsageFlags usage,
+                                    VkBuffer& buffer,
+                                    VkDeviceMemory& memory) const {
+        return createBuffer(size,
+            usage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            buffer, memory);
+    }
+    
+    // 复制缓冲区（设备本地 ↔ 设备本地 或 暂存 ↔ 设备本地）
+    void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size,
+                    VkCommandPool pool = VK_NULL_HANDLE) const;
     
 private:
-    // Vulkan实例
     VkInstance instance_;
     VkDebugUtilsMessengerEXT debug_messenger_;
-    
-    // 物理设备
     VkPhysicalDevice physical_device_;
-    
-    // 逻辑设备
     VkDevice device_;
-    
-    // 队列
     VkQueue compute_queue_;
     uint32_t compute_queue_family_index_;
     
-    // 初始化步骤
     bool createInstance(bool enable_validation);
     bool selectPhysicalDevice();
     bool createLogicalDevice();
-    
-    // 验证层支持
     bool checkValidationLayerSupport(const std::vector<const char*>& layers);
     void setupDebugMessenger(bool enable_validation);
-    
-    // 工具函数
     uint32_t findComputeQueueFamily() const;
     bool isDeviceSuitable(VkPhysicalDevice device) const;
-    
-    // 获取物理设备属性
     VkPhysicalDeviceProperties getPhysicalDeviceProperties() const;
-    
-    // 内存辅助函数
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const;
 };
 
