@@ -1,0 +1,91 @@
+#version 450
+layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y) in;
+layout(std140, binding = 0) uniform Parameters {
+    uint imageWidth, imageHeight, maxDisparity, windowSize;
+    float uniquenessRatio, penaltyP1, penaltyP2;
+    uint flags, speckleWindow, speckleRange, medianSize, padding[3];
+} params;
+layout(binding = 1) readonly buffer LeftImage { uint pixels[]; } leftImg;
+layout(binding = 2) readonly buffer RightImage { uint pixels[]; } rightImg;
+layout(binding = 3) writeonly buffer LeftCensus { uint bits[]; } leftCensus;
+layout(binding = 4) writeonly buffer RightCensus { uint bits[]; } rightCensus;
+layout(binding = 5) writeonly buffer Debug { uint data[]; } debug;
+
+// 半径定义为 int 常量表达式（关键修复）
+#define RADIUS int((WINDOW_SIZE - 1) / 2)
+
+shared uint tileLeft[WORKGROUP_X + 2 * RADIUS][WORKGROUP_Y + 2 * RADIUS];
+shared uint tileRight[WORKGROUP_X + 2 * RADIUS][WORKGROUP_Y + 2 * RADIUS];
+
+void main() {
+    int gx = int(gl_GlobalInvocationID.x);
+    int gy = int(gl_GlobalInvocationID.y);
+    int imgW = int(params.imageWidth);
+    int imgH = int(params.imageHeight);
+    if (gx >= imgW || gy >= imgH) return;
+
+    int lx = int(gl_LocalInvocationID.x);
+    int ly = int(gl_LocalInvocationID.y);
+    int wgx = int(gl_WorkGroupID.x);
+    int wgy = int(gl_WorkGroupID.y);
+    int wgSizeX = int(WORKGROUP_X);
+    int wgSizeY = int(WORKGROUP_Y);
+    int radius = RADIUS;   // 现在 RADIUS 已经是 int，赋值安全
+    int baseX = wgx * wgSizeX;
+    int baseY = wgy * wgSizeY;
+
+    // 协作加载带 halo 的图像块到共享内存
+    for (int dy = -radius; dy <= radius; dy += wgSizeY) {
+        for (int dx = -radius; dx <= radius; dx += wgSizeX) {
+            int loadX = baseX + lx + dx;
+            int loadY = baseY + ly + dy;
+            if (loadX >= 0 && loadX < imgW && loadY >= 0 && loadY < imgH) {
+                uint idx = uint(loadY) * params.imageWidth + uint(loadX);
+                tileLeft[lx + radius + dx][ly + radius + dy] = leftImg.pixels[idx];
+                tileRight[lx + radius + dx][ly + radius + dy] = rightImg.pixels[idx];
+            } else {
+                tileLeft[lx + radius + dx][ly + radius + dy] = 0u;
+                tileRight[lx + radius + dx][ly + radius + dy] = 0u;
+            }
+        }
+    }
+    barrier();
+
+    uint centerLeft  = tileLeft[lx + radius][ly + radius];
+    uint centerRight = tileRight[lx + radius][ly + radius];
+
+    uint bitsLowLeft = 0, bitsHighLeft = 0, bitsLowRight = 0, bitsHighRight = 0;
+    int bitIdx = 0;
+    for (int dy = -radius; dy <= radius; ++dy) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            uint neighborLeft  = tileLeft[lx + radius + dx][ly + radius + dy];
+            uint neighborRight = tileRight[lx + radius + dx][ly + radius + dy];
+            if (bitIdx < 32) {
+                if (neighborLeft  > centerLeft)  bitsLowLeft  |= 1u << bitIdx;
+                if (neighborRight > centerRight) bitsLowRight |= 1u << bitIdx;
+            } else {
+                if (neighborLeft  > centerLeft)  bitsHighLeft  |= 1u << (bitIdx - 32);
+                if (neighborRight > centerRight) bitsHighRight |= 1u << (bitIdx - 32);
+            }
+            ++bitIdx;
+        }
+    }
+
+    uint idx = uint(gy) * params.imageWidth + uint(gx);
+    leftCensus.bits[idx * 2u]     = bitsLowLeft;
+    leftCensus.bits[idx * 2u + 1u] = bitsHighLeft;
+    rightCensus.bits[idx * 2u]     = bitsLowRight;
+    rightCensus.bits[idx * 2u + 1u] = bitsHighRight;
+
+    if (gx == 0 && gy == 0) {
+        debug.data[0] = bitsLowLeft;
+        debug.data[1] = bitsHighLeft;
+        debug.data[2] = bitsLowRight;
+        debug.data[3] = bitsHighRight;
+        debug.data[4] = params.imageWidth;
+        debug.data[5] = params.imageHeight;
+        debug.data[6] = params.windowSize;
+        debug.data[7] = uint(radius);
+    }
+}

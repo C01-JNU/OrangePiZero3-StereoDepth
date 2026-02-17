@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>orangepizero3_stereodepth</name>
+  <version>1.0.0</version>
+  <description>Real-time stereo depth computation for OrangePi Zero3 with ROS2 support</description>
+  <maintainer email="c01-jnu@example.com">C01-JNU</maintainer>
+  <license>MIT</license>
+  <author email="c01-jnu@example.com">C01-JNU</author>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>image_transport</depend>
+  <depend>opencv</depend>
+  <depend>yaml-cpp</depend>
+  <depend>spdlog</depend>
+  <depend>vulkan</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

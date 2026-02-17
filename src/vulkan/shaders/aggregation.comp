@@ -1,0 +1,38 @@
+#version 450
+layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y, local_size_z = 1) in;
+layout(std140, binding = 0) uniform Parameters {
+    uint imageWidth, imageHeight, maxDisparity, windowSize;
+    float uniquenessRatio, penaltyP1, penaltyP2;
+    uint flags, speckleWindow, speckleRange, medianSize, padding[3];
+} params;
+layout(binding = 1) readonly buffer InputCost { uint cost[]; } inCost;
+layout(binding = 3) writeonly buffer OutputCost { uint cost[]; } outCost;
+layout(binding = 5) writeonly buffer Debug { uint data[]; } debug;
+#define AGG_RADIUS ((AGGREGATION_WINDOW - 1) / 2)
+void main() {
+    uint x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y, d = gl_GlobalInvocationID.z;
+    if (x >= params.imageWidth || y >= params.imageHeight || d >= params.maxDisparity) return;
+    uint pixelIdx = y * params.imageWidth + x;
+    uint volIdx = pixelIdx * params.maxDisparity + d;
+    uint sum = 0u, count = 0u;
+    for (int dy = -int(AGG_RADIUS); dy <= int(AGG_RADIUS); ++dy) {
+        int ny = int(y) + dy;
+        if (ny < 0 || ny >= int(params.imageHeight)) continue;
+        for (int dx = -int(AGG_RADIUS); dx <= int(AGG_RADIUS); ++dx) {
+            int nx = int(x) + dx;
+            if (nx < 0 || nx >= int(params.imageWidth)) continue;
+            uint nIdx = uint(ny) * params.imageWidth + uint(nx);
+            uint nVolIdx = nIdx * params.maxDisparity + d;
+            sum += inCost.cost[nVolIdx];
+            count++;
+        }
+    }
+    uint aggregated = (count > 0) ? (sum / count) : inCost.cost[volIdx];
+    outCost.cost[volIdx] = aggregated;
+    if (x == 0 && y == 0 && d == 0) {
+        debug.data[0] = inCost.cost[0];
+        debug.data[1] = aggregated;
+        debug.data[2] = AGGREGATION_WINDOW;
+        debug.data[3] = count;
+    }
+}

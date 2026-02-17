@@ -1,0 +1,297 @@
+# ============================================================================
+# OrangePiZero3-StereoDepth 全局配置文件（完整注释版）
+# 最后更新: 2026年2月13日
+# 作者: C01-JNU & AI助手
+# 说明：所有参数均通过编译时生成脚本注入着色器/C++代码，修改后需重新编译。
+#      无运行时热重载，确保参数一致性。
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 1. 系统配置
+# ----------------------------------------------------------------------------
+system:
+  # 运行模式
+  # 类型: string
+  # 可选值:
+  #   "gpu" - Vulkan GPU 加速流水线（需 Mali-G31 及 PanVK 驱动）
+  #   "cpu" - CPU 立体匹配引擎（支持 OpenCV BM/SGBM 及自定义 Census+WTA）
+  # 默认: "cpu"
+  mode: "cpu"                     # 当前推荐使用 CPU 模式，GPU 优化中
+
+  # 调试日志级别
+  # 类型: int
+  # 0: TRACE   - 最详细，输出所有着色器调试信息（仅用于开发）
+  # 1: DEBUG   - 调试信息，记录管线初始化、参数验证等
+  # 2: INFO    - 常规信息（推荐）
+  # 3: WARN    - 警告，非致命错误
+  # 4: ERROR   - 错误，功能可能受损
+  # 5: CRITICAL- 严重错误，程序将终止
+  debug_level: 2
+
+  # 是否将日志写入文件
+  log_to_file: false
+  # 日志文件路径（当 log_to_file 为 true 时有效）
+  log_file_path: "logs/stereo_depth.log"
+
+# ----------------------------------------------------------------------------
+# 2. GPU / Vulkan 配置（仅当 system.mode = "gpu" 时生效）
+# ----------------------------------------------------------------------------
+gpu:
+  # 是否启用GPU加速（若为false则自动回退CPU，但CPU模式需单独配置）
+  enabled: false
+
+  # Vulkan API 版本
+  # OrangePi Zero3 (Mali-G31) 仅支持 1.0，**严禁修改**！
+  vulkan_version: "1.0"
+
+  # 是否启用Vulkan校验层
+  # Mali-G31 + PanVK 驱动不支持校验层，**必须为 false**！
+  enable_validation: false
+
+  # 计算着色器工作组大小（线程数）
+  # 类型: [uint, uint]
+  # 建议: [16, 16] 匹配 Mali-G31 硬件特性，过大可能导致寄存器溢出
+  shader_workgroup_size: [16, 16]
+
+  # 最大GPU内存使用（MB）
+  max_memory_mb: 256
+
+  # 是否使用异步传输队列（暂未实现，预留）
+  use_async_transfer: true
+  # 暂存缓冲区大小（MB），用于 staging buffer
+  staging_buffer_size: 16
+
+# ----------------------------------------------------------------------------
+# 3. 摄像头与图像基础配置（CPU/GPU通用）
+# ----------------------------------------------------------------------------
+camera:
+  # 原始拼接图像宽度（像素）
+  # 类型: uint
+  # 说明：左右图像已拼接成一张图，宽度为单眼宽度的两倍
+  # 默认: 640（此时单眼宽度 = 320）
+  width: 640
+
+  # 原始拼接图像高度（像素）
+  # 类型: uint
+  # 默认: 480
+  height: 480
+
+  # 目标帧率（用于摄像头流）
+  fps: 30
+
+  # 自动曝光（预留）
+  auto_exposure: true
+  # 自动白平衡（预留）
+  auto_white_balance: true
+  # 去噪强度（预留）
+  denoise_strength: 0.5
+
+# ----------------------------------------------------------------------------
+# 4. 金字塔多层配置（仅 GPU 模式使用，CPU 模式忽略）
+# ----------------------------------------------------------------------------
+pyramid:
+  # 是否启用分辨率金字塔
+  # true : 启用，从粗到细逐步优化，可大幅提升大视差场景的鲁棒性
+  # false: 禁用，只计算第0层（单层）
+  enabled: true
+
+  # 金字塔层数
+  # 类型: uint
+  # 建议: 3（0层最细，2层最粗）
+  # 说明：每层尺寸按 scale_factor 递归缩小，直至小于 min_size
+  levels: 3
+
+  # 每层缩放因子
+  # 类型: float
+  # 范围: 0.25 ~ 0.75，典型值 0.5
+  # 说明：下一层尺寸 = 当前层尺寸 × scale_factor，并向下取偶
+  scale_factor: 0.5
+
+  # 最小尺寸阈值（宽，高）
+  # 类型: [uint, uint]
+  # 说明：当某一层尺寸小于此值时，停止继续下采样
+  min_size: [80, 60]
+
+  # 视差搜索半径（关键优化参数！）
+  # 类型: uint
+  # 范围: 4 ~ 16，典型值 8
+  # 说明：非顶层（层索引 > 0）使用上层下采样的视差作为先验，
+  #       匹配时仅搜索 [prior - search_radius, prior + search_radius]。
+  #       可大幅降低计算量，同时保持精度。顶层（最粗层）无先验，仍全范围搜索。
+  search_radius: 8
+
+# ----------------------------------------------------------------------------
+# 5. 立体匹配算法通用参数（CPU/GPU 均会使用）
+#    各层可通过 layer_overrides 单独覆盖（仅 GPU）
+# ----------------------------------------------------------------------------
+stereo:
+  # ---------- 核心算法选择 ----------
+  # 算法名称（CPU模式有效，GPU模式固定为自定义 Census+WTA）
+  # 类型: string
+  # 可选值:
+  #   "census_wta" - 自定义 Census 变换 + 汉明距离 + WTA（纯CPU实现）
+  #   "bm"         - OpenCV StereoBM（快速，精度一般）
+  #   "sgbm"       - OpenCV StereoSGBM（精度较高，速度适中）
+  # 默认: "sgbm"
+  algorithm: "sgbm"
+
+  # ---------- 图像尺寸（自动计算，无需在此配置）----------
+  # 单眼宽度 = camera.width / 2
+  # 单眼高度 = camera.height
+  # 各层宽高由 pyramid 配置自动生成（仅GPU）
+
+  # ---------- 核心算法参数 ----------
+  # Census 变换窗口大小（用于自定义 census_wta 以及 GPU 流水线）
+  # 类型: uint
+  # 建议: 7（9×9窗口边界处理困难，7×7为平衡选择）
+  # 说明：必须为奇数，着色器内使用共享内存优化
+  census_window: 7
+
+  # 最大视差搜索范围
+  # 类型: uint
+  # 说明：左像素(x) 匹配 右像素(x-d)，d ∈ [0, disparity_range-1]
+  # 默认: 64
+  disparity_range: 64
+
+  # 最小视差（通常为0）
+  min_disparity: 0
+
+  # 代价聚合窗口大小（盒式滤波，仅 GPU 流水线使用）
+  cost_aggregation_window: 5
+
+  # 唯一性比率（%）
+  # 类型: float
+  # 范围: 0 ~ 100，典型值 15
+  # 说明：WTA时，若 (第二小代价 / 最小代价) < (1 + uniqueness_ratio/100)，则认为匹配歧义，标记为无效视差
+  uniqueness_ratio: 15
+
+  # 平滑惩罚参数 P1（小视差变化）—— 主要用于 SGBM，其他算法预留
+  # 类型: float
+  # 说明：SGBM 中 p1 = 8 * blockSize^2 经验值，这里保留配置灵活性
+  penalty_p1: 8.0
+
+  # 平滑惩罚参数 P2（大视差变化）
+  # 类型: float
+  # 说明：SGBM 中 p2 = 32 * blockSize^2 经验值
+  penalty_p2: 32.0
+
+  # ---------- 功能开关 ----------
+  # 是否使用 Census 变换（若禁用，代价计算将直接使用像素灰度差，当前未实现）
+  use_census: true
+  # 是否启用后处理（斑点过滤等，仅GPU）
+  enable_postprocessing: true
+  # 是否启用中值滤波（CPU/GPU均支持）
+  use_median_filter: true
+
+  # ---------- 后处理参数 ----------
+  # 斑点窗口大小（像素，仅GPU）
+  speckle_window_size: 100
+  # 斑点视差差阈值（仅GPU）
+  speckle_range: 32
+  # 中值滤波器尺寸（必须为奇数）
+  median_filter_size: 3
+
+# ----------------------------------------------------------------------------
+# 6. 金字塔层独立参数覆盖（仅 GPU 模式使用）
+#    此处定义的字段会覆盖 stereo 节中的同名参数
+#    未列出的层使用 stereo 节默认值
+# ----------------------------------------------------------------------------
+layer_overrides:
+  - level: 0
+    # 第0层使用默认参数，无需覆盖
+  - level: 1
+    # 第1层：降低Census窗口和视差范围，加速且减少误匹配
+    census_window: 5
+    disparity_range: 32
+  - level: 2
+    # 第2层（最粗）：进一步压缩
+    census_window: 5
+    disparity_range: 16
+  # 若 levels > 3，可继续添加...
+
+# ----------------------------------------------------------------------------
+# 7. 相机标定配置
+# ----------------------------------------------------------------------------
+calibration:
+  # 是否自动标定（暂未实现）
+  auto_calibrate: false
+  # 标定结果文件路径（YAML格式）
+  calibration_file: "calibration_results/stereo_calibration.yml"
+  # 是否使用标定参数进行立体校正
+  use_calibration: true
+  # 是否在校正阶段重映射图像（CPU实现）
+  rectify_images: true
+
+  # 棋盘格标定板内角点数（宽，高）
+  chessboard_size: [9, 6]
+  board_width: 9
+  board_height: 6
+  # 棋盘格方块边长（米）
+  square_size: 0.15
+
+# ----------------------------------------------------------------------------
+# 8. 性能基准与监控
+# ----------------------------------------------------------------------------
+performance:
+  # 是否启用性能基准测试（输出每帧耗时）
+  enable_benchmark: true
+  # 基准测试迭代次数（用于平均）
+  benchmark_iterations: 100
+  # 是否启用详细性能分析（暂未实现）
+  enable_profiling: false
+  # 目标帧率（用于动态调整）
+  target_fps: 10
+  # 是否在日志中记录FPS
+  log_fps: true
+  # 是否记录内存使用
+  log_memory: true
+  # 监控更新间隔（毫秒）
+  update_interval_ms: 1000
+  # 性能数据输出文件（CSV）
+  profile_file: "logs/performance.csv"
+
+# ----------------------------------------------------------------------------
+# 9. 输出与测试模式
+# ----------------------------------------------------------------------------
+output:
+  # 是否保存视差图（PNG格式）
+  save_disparity: true
+  # 是否保存深度图（需标定参数，暂未实现）
+  save_depth: true
+  # 输出图像格式
+  output_format: "png"
+  # 输出目录（自动创建）
+  output_dir: "images/output"
+  # 是否在窗口显示结果（仅当有GUI环境时）
+  visualize_results: true
+
+  # ---------- 测试模式 ----------
+  # 是否使用测试图像（而非实时摄像头）
+  use_test_images: true
+  # 测试图像目录（存放左右拼接图）
+  test_image_dir: "images/test"
+  # 标定图像采集目录（用于标定程序）
+  calibration_dir: "images/calibration"
+
+# ----------------------------------------------------------------------------
+# 10. ROS2 集成配置
+# ----------------------------------------------------------------------------
+ros2:
+  # 是否启用ROS2节点
+  enabled: true
+  # 节点名称
+  node_name: "stereo_depth_node"
+  # 命名空间
+  namespace: "stereo"
+
+  # 话题名称
+  topics:
+    left_image:   "/camera/left/image_raw"
+    right_image:  "/camera/right/image_raw"
+    disparity:    "/stereo/disparity"
+    depth:        "/stereo/depth"
+    pointcloud:   "/stereo/points"
+
+  # QoS配置
+  qos_depth: 10
+  qos_reliability: "best_effort"   # 可选: best_effort, reliable

@@ -1,0 +1,60 @@
+# 构建文件
+build/
+*.o
+*.so
+*.a
+
+# IDE文件
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 编译产物
+bin/
+lib/
+
+# 临时文件
+*.tmp
+*.log
+logs/
+src/vulkan/spv/*
+src/vulkan/generated/*
+/tools/__pycache__/
+
+# 图像文件（使用通配符匹配所有图像格式）
+images/**/*.png
+images/**/*.jpg
+images/**/*.jpeg
+images/**/*.bmp
+images/**/*.tiff
+images/**/*.tif
+images/**/*.raw
+images/**/*.gif
+images/**/*.webp
+images/**/*.ico
+images/**/*.bin
+
+# 标定结果
+#calibration_results/*.yml
+#calibration_results/*.yaml
+#calibration_results/*.xml
+#我认为这个可以不忽略，先注释掉
+
+# 着色器编译缓存
+shaders/compiled/*
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 备份文件
+*.bak
+*.backup
+
+# 本地配置文件
+local_config.yaml
+.env
+
+#第三方库
+third_party/*

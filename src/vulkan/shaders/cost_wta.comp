@@ -1,0 +1,100 @@
+#version 450
+// 代价计算 + WTA 合并着色器（支持视差先验传播）
+// 输入：左/右Census描述符 + 先验视差图（来自上层）
+// 输出：视差图
+// 绑定规范：
+//   binding 0: Uniform (包含 searchRadius)
+//   binding 1: 左Census
+//   binding 2: 右Census
+//   binding 3: 视差图输出
+//   binding 4: 先验视差图（仅当 level>0 时有效，无效像素值 = MAX_DISPARITY）
+//   binding 5: 调试缓冲区
+// 最后更新: 2026年2月13日
+
+layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y) in;
+
+layout(std140, binding = 0) uniform Parameters {
+    uint imageWidth, imageHeight, maxDisparity, windowSize;
+    float uniquenessRatio, penaltyP1, penaltyP2;
+    uint flags, speckleWindow, speckleRange, medianSize, searchRadius;
+    uint padding[2];
+} params;
+
+layout(binding = 1) readonly buffer LeftCensus { uint bits[]; } leftCensus;
+layout(binding = 2) readonly buffer RightCensus { uint bits[]; } rightCensus;
+layout(binding = 3) writeonly buffer Disparity { uint disp[]; } disparity;
+layout(binding = 4) readonly buffer PriorDisparity { uint disp[]; } priorDisparity;
+layout(binding = 5) writeonly buffer Debug { uint data[]; } debug;
+
+uint popcnt(uint x) { return bitCount(x); }
+uint hamming64(uint low1, uint high1, uint low2, uint high2) {
+    return popcnt(low1 ^ low2) + popcnt(high1 ^ high2);
+}
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= params.imageWidth || y >= params.imageHeight) return;
+
+    uint pixelIdx = y * params.imageWidth + x;
+    uint baseIdx = pixelIdx * 2u;
+
+    uint leftLow  = leftCensus.bits[baseIdx];
+    uint leftHigh = leftCensus.bits[baseIdx + 1u];
+
+    // 读取先验视差（若存在）
+    uint prior = priorDisparity.disp[pixelIdx];
+    bool hasPrior = (prior < params.maxDisparity);
+
+    // 确定搜索范围
+    uint startD = 0u, endD = params.maxDisparity;
+    if (hasPrior) {
+        int s = int(prior) - int(params.searchRadius);
+        int e = int(prior) + int(params.searchRadius);
+        startD = uint(max(s, 0));
+        endD   = uint(min(e, int(params.maxDisparity) - 1)) + 1u;
+    }
+
+    uint bestCost = 64u;
+    uint bestDisp = 0u;
+    uint secondCost = 64u;
+
+    for (uint d = startD; d < endD; ++d) {
+        uint cost = 64u;
+        if (x >= d) {
+            uint rightIdx = y * params.imageWidth + (x - d);
+            uint rightBase = rightIdx * 2u;
+            uint rightLow  = rightCensus.bits[rightBase];
+            uint rightHigh = rightCensus.bits[rightBase + 1u];
+            cost = hamming64(leftLow, leftHigh, rightLow, rightHigh);
+        }
+
+        if (cost < bestCost) {
+            secondCost = bestCost;
+            bestCost = cost;
+            bestDisp = d;
+        } else if (cost < secondCost) {
+            secondCost = cost;
+        }
+    }
+
+    uint outDisp = params.maxDisparity;
+    if (bestCost < 64u) {
+        float ratio = float(secondCost) / float(bestCost);
+        if (ratio >= (1.0 + params.uniquenessRatio)) {
+            outDisp = bestDisp;
+        }
+    }
+
+    disparity.disp[pixelIdx] = outDisp;
+
+    if (x == 0 && y == 0) {
+        debug.data[0] = bestDisp;
+        debug.data[1] = bestCost;
+        debug.data[2] = secondCost;
+        debug.data[3] = outDisp;
+        debug.data[4] = hasPrior ? prior : params.maxDisparity;
+        debug.data[5] = startD;
+        debug.data[6] = endD - 1u;
+    }
+}

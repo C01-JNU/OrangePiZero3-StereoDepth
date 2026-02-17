@@ -1,0 +1,40 @@
+#version 450
+layout(local_size_x = WORKGROUP_X, local_size_y = WORKGROUP_Y) in;
+layout(std140, binding = 0) uniform Parameters {
+    uint imageWidth, imageHeight, maxDisparity, windowSize;
+    float uniquenessRatio, penaltyP1, penaltyP2;
+    uint flags, speckleWindow, speckleRange, medianSize, padding[3];
+} params;
+layout(binding = 1) readonly buffer CostVolume { uint cost[]; } costVol;
+layout(binding = 3) writeonly buffer Disparity { uint disp[]; } disparity;
+layout(binding = 5) writeonly buffer Debug { uint data[]; } debug;
+void main() {
+    uint x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y;
+    if (x >= params.imageWidth || y >= params.imageHeight) return;
+    uint pixelIdx = y * params.imageWidth + x;
+    uint baseIdx = pixelIdx * params.maxDisparity;
+    uint bestDisp = 0u, bestCost = 64u, secondCost = 64u;
+    for (uint d = 0u; d < params.maxDisparity; ++d) {
+        uint c = costVol.cost[baseIdx + d];
+        if (c < bestCost) {
+            secondCost = bestCost;
+            bestCost = c;
+            bestDisp = d;
+        } else if (c < secondCost) {
+            secondCost = c;
+        }
+    }
+    uint outDisp = params.maxDisparity;
+    if (bestCost < 64u) {
+        float ratio = float(secondCost) / float(bestCost);
+        if (ratio >= (1.0 + params.uniquenessRatio)) {
+            outDisp = bestDisp;
+        }
+    }
+    disparity.disp[pixelIdx] = outDisp;
+    if (x == 0 && y == 0) {
+        debug.data[0] = bestDisp; debug.data[1] = bestCost;
+        debug.data[2] = secondCost; debug.data[3] = outDisp;
+        debug.data[4] = uint(params.uniquenessRatio * 100.0);
+    }
+}

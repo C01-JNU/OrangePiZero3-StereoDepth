@@ -1,0 +1,101 @@
+%YAML:1.0
+---
+calibration_date: "Feb 13 2026 12:00:00"
+image_width: 320
+image_height: 480
+board_width: 9
+board_height: 6
+square_size: 0.015
+images_used: 30
+best_group_size: 0
+best_group_index: 0
+rms_error: 0.5
+baseline_meters: 0.0405
+camera_matrix_left: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 350.0, 0.0, 160.0,
+           0.0, 350.0, 240.0,
+           0.0, 0.0, 1.0 ]
+distortion_coefficients_left: !!opencv-matrix
+   rows: 5
+   cols: 1
+   dt: d
+   data: [ 0.0, 0.0, 0.0, 0.0, 0.0 ]
+camera_matrix_right: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 350.0, 0.0, 160.0,
+           0.0, 350.0, 240.0,
+           0.0, 0.0, 1.0 ]
+distortion_coefficients_right: !!opencv-matrix
+   rows: 5
+   cols: 1
+   dt: d
+   data: [ 0.0, 0.0, 0.0, 0.0, 0.0 ]
+rotation_matrix: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 1.0, 0.0, 0.0,
+           0.0, 1.0, 0.0,
+           0.0, 0.0, 1.0 ]
+translation_vector: !!opencv-matrix
+   rows: 3
+   cols: 1
+   dt: d
+   data: [ 0.0405, 0.0, 0.0 ]
+essential_matrix: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 0.0, 0.0, 0.0,
+           0.0, 0.0, -0.0405,
+           0.0, 0.0405, 0.0 ]
+fundamental_matrix: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 0.0, 0.0, 0.0,
+           0.0, 0.0, -0.000115714,
+           0.0, 0.000115714, 0.0 ]
+rectification_transform_left: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 1.0, 0.0, 0.0,
+           0.0, 1.0, 0.0,
+           0.0, 0.0, 1.0 ]
+rectification_transform_right: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 1.0, 0.0, 0.0,
+           0.0, 1.0, 0.0,
+           0.0, 0.0, 1.0 ]
+projection_matrix_left: !!opencv-matrix
+   rows: 3
+   cols: 4
+   dt: d
+   data: [ 350.0, 0.0, 160.0, 0.0,
+           0.0, 350.0, 240.0, 0.0,
+           0.0, 0.0, 1.0, 0.0 ]
+projection_matrix_right: !!opencv-matrix
+   rows: 3
+   cols: 4
+   dt: d
+   data: [ 350.0, 0.0, 160.0, -14.175,
+           0.0, 350.0, 240.0, 0.0,
+           0.0, 0.0, 1.0, 0.0 ]
+disparity_to_depth_mapping_matrix: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: d
+   data: [ 1.0, 0.0, 0.0, -160.0,
+           0.0, 1.0, 0.0, -240.0,
+           0.0, 0.0, 0.0, 350.0,
+           0.0, 0.0, -24.6913580247, 0.0 ]
+valid_roi_left: [ 0, 0, 320, 480 ]
+valid_roi_right: [ 0, 0, 320, 480 ]
