@@ -12,6 +12,7 @@
 #include <atomic>
 #include <filesystem>
 #include <unistd.h>
+#include <Eigen/Core>
 
 #include "utils/logger.hpp"
 #include "utils/config.hpp"
@@ -28,7 +29,7 @@
 #endif
 
 using namespace stereo_depth::utils;
-using namespace stereo_depth;  // 引入 stereo_depth 命名空间，以便直接使用 calibration 和 cpu_stereo
+using namespace stereo_depth;
 
 namespace stereo_depth_ros {
 
@@ -45,21 +46,23 @@ std::string getExeDir() {
 
 class StereoDepthNode : public rclcpp::Node {
 public:
-    StereoDepthNode() : Node("stereo_depth_node") {
+    StereoDepthNode() 
+    : Node("stereo_depth_node"),
+      target_fps_(15),        // 临时默认值，会被配置文件覆盖
+      use_rectification_(false),
+      publish_depth_(false),
+      publish_pointcloud_(false),
+      log_counter_(0)
+    {
         Logger::initialize("stereo_depth_ros", spdlog::level::info);
         RCLCPP_INFO(this->get_logger(), "立体深度节点启动");
 
-        // 获取可执行文件目录
         std::string exeDir = getExeDir();
         std::string configPath;
 
-        // 尝试多个可能的位置查找配置文件
         std::vector<std::string> candidatePaths = {
-            // 1. 与可执行文件同目录下的 config/global_config.yaml（独立运行）
             (std::filesystem::path(exeDir) / "config" / "global_config.yaml").string(),
-            // 2. ROS2 install 目录下的 config（通过 ros2 run 运行时）
             (std::filesystem::path(exeDir).parent_path().parent_path() / "share" / "orangepizero3_stereodepth" / "config" / "global_config.yaml").string(),
-            // 3. 项目源码目录（调试时）
             (std::filesystem::path(exeDir).parent_path().parent_path().parent_path() / "config" / "global_config.yaml").string()
         };
 
@@ -87,7 +90,7 @@ public:
         }
         const auto& cfg = cfg_mgr.getConfig();
 
-        // 声明并获取 ROS2 参数
+        // 从配置文件读取 ROS2 参数
         this->declare_parameter<bool>("publish_depth", false);
         this->declare_parameter<bool>("publish_pointcloud", false);
         publish_depth_ = this->get_parameter("publish_depth").as_bool();
@@ -96,7 +99,6 @@ public:
         RCLCPP_INFO(this->get_logger(), "ROS2 参数: publish_depth=%d, publish_pointcloud=%d",
                     publish_depth_, publish_pointcloud_);
 
-        // 从全局配置文件读取话题和其他参数
         std::string left_topic = cfg.get<std::string>("ros2.topics.left_image", "/camera/left/image_raw");
         std::string right_topic = cfg.get<std::string>("ros2.topics.right_image", "/camera/right/image_raw");
         std::string disparity_topic = cfg.get<std::string>("ros2.topics.disparity", "/stereo/disparity");
@@ -109,7 +111,6 @@ public:
         use_rectification_ = cfg.get<bool>("calibration.rectify_images", false);
         std::string calib_file = cfg.get<std::string>("calibration.calibration_file", "calibration_results/stereo_calibration.yml");
 
-        // 查找标定文件
         std::string calibPath;
         std::vector<std::string> calibCandidates = {
             (std::filesystem::path(exeDir) / "calibration_results" / "stereo_calibration.yml").string(),
@@ -147,7 +148,6 @@ public:
             }
         }
 
-        // 初始化深度计算引擎
 #if ENABLE_CPU
         cpu_matcher_ = std::make_unique<cpu_stereo::CpuStereoMatcher>();
         if (!cpu_matcher_->initializeFromConfig()) {
@@ -157,7 +157,6 @@ public:
         }
         RCLCPP_INFO(this->get_logger(), "CPU 立体匹配引擎已初始化");
 #elif ENABLE_GPU
-        // GPU 初始化略（根据实际需要添加）
         RCLCPP_ERROR(this->get_logger(), "GPU 模式暂未实现");
         rclcpp::shutdown();
         return;
@@ -187,10 +186,8 @@ public:
             std::bind(&StereoDepthNode::rightImageCallback, this, std::placeholders::_1),
             options);
 
-        // 视差始终发布
         disp_pub_ = image_transport::create_publisher(this, disparity_topic);
 
-        // 深度和点云发布器
         if (publish_depth_) {
             depth_pub_ = this->create_publisher<sensor_msgs::msg::Image>(depth_topic, qos);
         }
@@ -258,18 +255,15 @@ private:
         float proc_ms = std::chrono::duration<float, std::milli>(end - start).count();
         RCLCPP_DEBUG(this->get_logger(), "视差计算耗时: %.2f ms", proc_ms);
 
-        // 发布视差图
         publishDisparity(disparity, left_msg->header.stamp);
 
-        // 如果需要深度图，计算并发布
         if (publish_depth_ && rectifier_) {
             cv::Mat depth = computeDepth(disparity);
             publishDepth(depth, left_msg->header.stamp);
         }
 
-        // 如果需要点云，生成并发布
         if (publish_pointcloud_ && rectifier_) {
-            auto cloud = generatePointCloud(disparity, left_msg->header.stamp);
+            auto cloud = generatePointCloudManual(disparity, left_msg->header.stamp);
             cloud_pub_->publish(cloud);
         }
     }
@@ -287,10 +281,9 @@ private:
     }
 
     cv::Mat computeDepth(const cv::Mat& disparity) {
-        // 深度 = 焦距 * 基线 / 视差
         const auto& params = rectifier_->getCalibrationParams();
         double fx = params.camera_matrix_left.at<double>(0, 0);
-        double baseline = cv::norm(params.translation_vector); // 单位：米
+        double baseline = cv::norm(params.translation_vector); // 米
 
         cv::Mat depth(disparity.size(), CV_32FC1);
         for (int i = 0; i < disparity.rows; ++i) {
@@ -318,7 +311,7 @@ private:
         depth_pub_->publish(*depth_msg);
     }
 
-    sensor_msgs::msg::PointCloud2 generatePointCloud(const cv::Mat& disparity, const rclcpp::Time& stamp) {
+    sensor_msgs::msg::PointCloud2 generatePointCloudManual(const cv::Mat& disparity, const rclcpp::Time& stamp) {
         const auto& params = rectifier_->getCalibrationParams();
         double fx = params.camera_matrix_left.at<double>(0, 0);
         double fy = params.camera_matrix_left.at<double>(1, 1);
@@ -326,60 +319,100 @@ private:
         double cy = params.camera_matrix_left.at<double>(1, 2);
         double baseline = cv::norm(params.translation_vector); // 米
 
-        sensor_msgs::msg::PointCloud2 cloud_msg;
-        cloud_msg.header.stamp = stamp;
-        cloud_msg.header.frame_id = "stereo_depth";
+        // 将16位视差图转换为浮点型，并除以16得到真实视差（像素）
+        cv::Mat disp_float;
+        disparity.convertTo(disp_float, CV_32F, 1.0/16.0);
 
+        // 计算视差非零像素总数，用于调试
+        int total_pixels = disp_float.rows * disp_float.cols;
+        int valid_pixels = 0;
+
+        // 临时存储点云数据
+        std::vector<Eigen::Vector3f> points;
+        points.reserve(total_pixels);
+
+        // 记录第一个有效点的信息
+        bool first_valid_logged = false;
+
+        for (int v = 0; v < disp_float.rows; ++v) {
+            for (int u = 0; u < disp_float.cols; ++u) {
+                float d = disp_float.at<float>(v, u);
+                if (d <= 0.5f) continue; // 忽略太小的视差（可能为0或噪声）
+
+                valid_pixels++;
+
+                // 深度计算
+                float Z = fx * baseline / d;
+                if (Z <= 0.001f) continue; // 忽略深度太小（可能为0）
+
+                float X = (u - cx) * Z / fx;
+                float Y = (v - cy) * Z / fy;
+
+                points.emplace_back(X, Y, Z);
+
+                // 打印第一个有效点（仅在前5帧内）
+                if (log_counter_ < 5 && !first_valid_logged) {
+                    RCLCPP_INFO(this->get_logger(), "第一个有效点: u=%d, v=%d, d=%f, X=%f, Y=%f, Z=%f",
+                                u, v, d, X, Y, Z);
+                    first_valid_logged = true;
+                }
+            }
+        }
+
+        // 打印统计信息（仅前5帧）
+        if (log_counter_ < 5) {
+            RCLCPP_INFO(this->get_logger(), "点云统计: 总像素=%d, 有效像素(视差>0.5)=%d, 生成点数=%zu",
+                        total_pixels, valid_pixels, points.size());
+            log_counter_++;
+        }
+
+        // 转换为ROS消息
+        sensor_msgs::msg::PointCloud2 cloud_msg;
         sensor_msgs::PointCloud2Modifier modifier(cloud_msg);
         modifier.setPointCloud2FieldsByString(1, "xyz");
-        modifier.reserve(disparity.rows * disparity.cols);
+        modifier.resize(points.size());  // 直接设置大小，并更新 width/height
 
         sensor_msgs::PointCloud2Iterator<float> iter_x(cloud_msg, "x");
         sensor_msgs::PointCloud2Iterator<float> iter_y(cloud_msg, "y");
         sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg, "z");
 
-        int count = 0;
-        for (int v = 0; v < disparity.rows; ++v) {
-            for (int u = 0; u < disparity.cols; ++u) {
-                float d = disparity.at<uint16_t>(v, u);
-                if (d > 0) {
-                    float Z = static_cast<float>(fx * baseline / d);
-                    float X = (u - cx) * Z / fx;
-                    float Y = (v - cy) * Z / fy;
-                    *iter_x = X;
-                    *iter_y = Y;
-                    *iter_z = Z;
-                    ++iter_x; ++iter_y; ++iter_z;
-                    ++count;
-                }
-            }
+        for (const auto& p : points) {
+            *iter_x = p.x();
+            *iter_y = p.y();
+            *iter_z = p.z();
+            ++iter_x; ++iter_y; ++iter_z;
         }
 
-        modifier.resize(count);
+        cloud_msg.header.stamp = stamp;
+        cloud_msg.header.frame_id = "stereo_depth";
+
+        // 调试输出消息元数据
+        RCLCPP_DEBUG(this->get_logger(), "点云消息: width=%d, height=%d, point_step=%d, row_step=%d",
+                     cloud_msg.width, cloud_msg.height,
+                     cloud_msg.point_step, cloud_msg.row_step);
+
         return cloud_msg;
     }
 
-    // ROS2 成员
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr left_sub_, right_sub_;
     image_transport::Publisher disp_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
 
-    // 图像缓冲区
     sensor_msgs::msg::Image::SharedPtr left_image_, right_image_;
     std::mutex left_mutex_, right_mutex_;
 
-    // 核心组件
     std::unique_ptr<calibration::StereoRectifier> rectifier_;
 #if ENABLE_CPU
     std::unique_ptr<cpu_stereo::CpuStereoMatcher> cpu_matcher_;
 #endif
 
-    int target_fps_ = 15;
-    bool use_rectification_ = false;
-    bool publish_depth_ = false;
-    bool publish_pointcloud_ = false;
+    int target_fps_;
+    bool use_rectification_;
+    bool publish_depth_;
+    bool publish_pointcloud_;
+    int log_counter_; // 用于控制前几帧的日志输出
 };
 
 } // namespace stereo_depth_ros

@@ -68,6 +68,7 @@ find_package(OpenCV REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(Threads REQUIRED)
+find_package(Eigen3 REQUIRED)   # 添加 Eigen
 
 if(BUILD_ROS2_NODE)
     find_package(rclcpp REQUIRED)
@@ -82,6 +83,7 @@ endif()
 # 项目包含目录
 # ============================================================================
 include_directories(${PROJECT_SOURCE_DIR}/src)
+include_directories(${EIGEN3_INCLUDE_DIRS})   # Eigen 头文件路径
 
 # ============================================================================
 # 通用工具模块
@@ -125,6 +127,7 @@ target_link_libraries(stereo_depth PRIVATE
     yaml-cpp
     Threads::Threads
     camera
+    ${EIGEN3_LIBRARIES}
 )
 if(ENABLE_GPU AND TARGET vulkan_stereo)
     target_link_libraries(stereo_depth PRIVATE vulkan_stereo)
@@ -154,6 +157,7 @@ target_link_libraries(stereo_depth_test PRIVATE
     yaml-cpp
     Threads::Threads
     camera
+    ${EIGEN3_LIBRARIES}
 )
 if(ENABLE_GPU AND TARGET vulkan_stereo)
     target_link_libraries(stereo_depth_test PRIVATE vulkan_stereo)
@@ -198,6 +202,7 @@ if(BUILD_ROS2_NODE)
         yaml-cpp
         Threads::Threads
         camera
+        ${EIGEN3_LIBRARIES}
     )
     if(ENABLE_GPU AND TARGET vulkan_stereo)
         target_link_libraries(stereo_depth_node vulkan_stereo)
@@ -219,7 +224,6 @@ if(BUILD_ROS2_NODE)
     install(DIRECTORY src/ros2_node/config/
         DESTINATION share/${PROJECT_NAME}/config
     )
-    # 安装全局配置文件和标定结果到 share 目录
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/config/global_config.yaml
         DESTINATION share/${PROJECT_NAME}/config
     )

@@ -3,6 +3,8 @@
 本项目代码由 DeepSeek 编写。  
 项目为香橙派 Zero3 的官方 Ubuntu 24.04 系统打造，支持 ROS2 Jazzy。
 
+> 香橙派的GPU算力太差了，速度和精度都不如使用CPU的OpenCV，只能当个玩具玩玩，所以默认就只能编译和运行CPU模式。想试试GPU模式的话就改配置文件。
+
 **代码仓库**  
 - Gitee: [https://gitee.com/C01-JNU/orange-pi-zero3-stereo-depth.git](https://gitee.com/C01-JNU/orange-pi-zero3-stereo-depth.git)  
 - GitHub: [https://github.com/C01-JNU/OrangePiZero3-StereoDepth.git](https://github.com/C01-JNU/OrangePiZero3-StereoDepth.git)
@@ -11,6 +13,7 @@
 
 ```bash
 sudo apt install libspdlog-dev
+sudo apt install libeigen3-dev
 ```
 
 ## 性能说明
@@ -27,6 +30,8 @@ sudo apt install libspdlog-dev
 默认的运行帧率上限是 **10fps**
 
 上述设置可以在 config/global_config.yaml 中找到和修改
+
+默认关闭深度图节点，开启点云节点。此设置可以在 src/ros2_node/config/params.yaml 找到和修改
 
 ---
 
