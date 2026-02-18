@@ -46,8 +46,6 @@ if [ $? -eq 0 ]; then
     echo "=== 构建成功！ ==="
     echo "可执行文件位于: build/bin/"
     echo ""
-    echo "重要提示：运行 GPU 模式前请确保已设置环境变量："
-    echo "export PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1"
 else
     echo ""
     echo "=== 构建失败！ ==="

@@ -15,13 +15,11 @@
 namespace stereo_depth {
 namespace calibration {
 
-// 辅助函数：检查文件是否存在
 static bool fileExists(const std::string& path) {
     struct stat buffer;
     return (stat(path.c_str(), &buffer) == 0);
 }
 
-// 辅助函数：获取绝对路径
 static std::string getAbsolutePath(const std::string& path) {
     if (path.empty() || path[0] == '/') return path;
     char cwd[PATH_MAX];
@@ -33,7 +31,6 @@ static std::string getAbsolutePath(const std::string& path) {
     return absPath;
 }
 
-// 辅助函数：创建目录
 static bool createDirectory(const std::string& path) {
     struct stat st;
     if (stat(path.c_str(), &st) != 0) {
@@ -45,51 +42,33 @@ static bool createDirectory(const std::string& path) {
 bool StereoCalibrator::loadConfiguration() {
     auto& config = utils::ConfigManager::getInstance().getConfig();
 
-    // 读取棋盘格尺寸
-    int bw = 0, bh = 0;
-    try {
-        bw = config.get<int>("calibration.chessboard_size[0]", 0);
-        bh = config.get<int>("calibration.chessboard_size[1]", 0);
-    } catch (...) {}
-    if (bw == 0 || bh == 0) {
-        std::string str = config.get<std::string>("calibration.chessboard_size", "[9,6]");
-        // 简单解析 [w, h]
-        str.erase(std::remove(str.begin(), str.end(), '['), str.end());
-        str.erase(std::remove(str.begin(), str.end(), ']'), str.end());
-        std::replace(str.begin(), str.end(), ',', ' ');
-        std::istringstream iss(str);
-        iss >> bw >> bh;
-    }
+    // 读取棋盘格尺寸（使用 board_width 和 board_height）
+    int bw = config.get<int>("calibration.board_width", 1);   // 默认1
+    int bh = config.get<int>("calibration.board_height", 1);  // 默认1
     if (bw <= 0 || bh <= 0) {
-        LOG_ERROR("棋盘格尺寸配置错误");
+        LOG_ERROR("棋盘格尺寸配置错误: board_width={}, board_height={}", bw, bh);
         return false;
     }
     m_boardSize = cv::Size(bw, bh);
 
     // 方格尺寸
-    m_squareSize = config.get<float>("calibration.square_size", 0.0f);
+    m_squareSize = config.get<float>("calibration.square_size", 1.0f); // 默认1.0米？不合理，但按用户要求默认1
     if (m_squareSize <= 0) {
         LOG_ERROR("方格尺寸配置错误");
         return false;
     }
 
-    // 图像尺寸：优先从 stereo 节读取，否则从 camera 计算
-    int iw = config.get<int>("stereo.image_width", 0);
-    int ih = config.get<int>("stereo.image_height", 0);
-    if (iw <= 0 || ih <= 0) {
-        int cw = config.get<int>("camera.width", 640);
-        int ch = config.get<int>("camera.height", 480);
-        iw = cw / 2;
-        ih = ch;
-    }
-    if (iw <= 0 || ih <= 0) {
+    // 图像尺寸：从 camera.width / camera.height 计算单眼尺寸
+    int cw = config.get<int>("camera.width", 1);   // 默认1，实际会被覆盖
+    int ch = config.get<int>("camera.height", 1);
+    m_imageSize = cv::Size(cw / 2, ch);
+    if (m_imageSize.width <= 0 || m_imageSize.height <= 0) {
         LOG_ERROR("图像尺寸配置错误");
         return false;
     }
-    m_imageSize = cv::Size(iw, ih);
 
     // 标定图像目录
-    m_calibrationDir = config.get<std::string>("output.calibration_dir", "");
+    m_calibrationDir = config.get<std::string>("output.calibration_dir", "images/calibration");
     if (m_calibrationDir.empty()) {
         LOG_ERROR("未配置 output.calibration_dir");
         return false;
@@ -98,7 +77,7 @@ bool StereoCalibrator::loadConfiguration() {
     LOG_INFO("标定图像目录: {}", m_calibrationDir);
 
     // 输出目录（从 calibration_file 提取）
-    std::string calibFile = config.get<std::string>("calibration.calibration_file", "");
+    std::string calibFile = config.get<std::string>("calibration.calibration_file", "calibration_results/stereo_calibration.yml");
     if (calibFile.empty()) {
         LOG_ERROR("未配置 calibration.calibration_file");
         return false;
@@ -127,13 +106,11 @@ std::vector<std::pair<std::string, std::string>> StereoCalibrator::findCalibrati
         return pairs;
     }
 
-    // 收集所有左图
     std::vector<std::string> leftFiles;
     struct dirent* entry;
     while ((entry = readdir(dir))) {
         std::string name = entry->d_name;
         if (name == "." || name == "..") continue;
-        // 简单判断左图：包含 _left 且以常见扩展名结尾
         std::string lower = name;
         std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
         if (lower.find("_left") != std::string::npos &&
@@ -149,10 +126,8 @@ std::vector<std::pair<std::string, std::string>> StereoCalibrator::findCalibrati
 
     LOG_INFO("找到 {} 个左眼图像", leftFiles.size());
 
-    // 匹配右图
     for (const auto& leftName : leftFiles) {
         std::string base = leftName;
-        // 将 _left 替换为 _right
         size_t p = base.find("_left");
         if (p == std::string::npos) continue;
         std::string rightName = base.substr(0, p) + "_right" + base.substr(p + 5);
@@ -182,13 +157,11 @@ bool StereoCalibrator::performCalibration(
     const std::vector<std::vector<cv::Point2f>>& imagePointsLeft,
     const std::vector<std::vector<cv::Point2f>>& imagePointsRight) {
 
-    // 初始化相机矩阵
     m_cameraMatrixLeft = cv::Mat::eye(3, 3, CV_64F);
     m_cameraMatrixRight = cv::Mat::eye(3, 3, CV_64F);
     m_distCoeffsLeft = cv::Mat::zeros(5, 1, CV_64F);
     m_distCoeffsRight = cv::Mat::zeros(5, 1, CV_64F);
 
-    // 单目标定（用于初始值）
     std::vector<cv::Mat> rvecsL, tvecsL, rvecsR, tvecsR;
     double rmsL = cv::calibrateCamera(objectPoints, imagePointsLeft, m_imageSize,
                                        m_cameraMatrixLeft, m_distCoeffsLeft, rvecsL, tvecsL);
@@ -196,7 +169,6 @@ bool StereoCalibrator::performCalibration(
                                        m_cameraMatrixRight, m_distCoeffsRight, rvecsR, tvecsR);
     LOG_DEBUG("单目标定 RMS: 左={:.6f}, 右={:.6f}", rmsL, rmsR);
 
-    // 双目标定
     int flags = cv::CALIB_USE_INTRINSIC_GUESS;
     cv::TermCriteria term(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 100, 1e-6);
     m_rmsError = cv::stereoCalibrate(objectPoints, imagePointsLeft, imagePointsRight,
@@ -224,7 +196,6 @@ bool StereoCalibrator::calibrate() {
         return false;
     }
 
-    // 准备物体点
     std::vector<cv::Point3f> obj;
     for (int i = 0; i < m_boardSize.height; ++i) {
         for (int j = 0; j < m_boardSize.width; ++j) {
@@ -247,7 +218,6 @@ bool StereoCalibrator::calibrate() {
             continue;
         }
 
-        // 可选：检查尺寸是否一致，不一致则缩放（简单处理）
         if (leftImg.size() != m_imageSize || rightImg.size() != m_imageSize) {
             cv::resize(leftImg, leftImg, m_imageSize);
             cv::resize(rightImg, rightImg, m_imageSize);
@@ -258,7 +228,6 @@ bool StereoCalibrator::calibrate() {
         bool rightOk = detectChessboardCorners(rightImg, cornersRight);
 
         if (leftOk && rightOk) {
-            // 亚像素优化
             cv::cornerSubPix(leftImg, cornersLeft, cv::Size(5,5), cv::Size(-1,-1),
                               cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.01));
             cv::cornerSubPix(rightImg, cornersRight, cv::Size(5,5), cv::Size(-1,-1),
@@ -280,13 +249,11 @@ bool StereoCalibrator::calibrate() {
     LOG_INFO("有效图像对数量: {}", validPairs);
     m_imagesUsed = validPairs;
 
-    // 执行标定
     if (!performCalibration(objectPoints, imagePointsLeft, imagePointsRight)) {
         LOG_ERROR("标定失败");
         return false;
     }
 
-    // 计算校正参数，并保存有效 ROI
     cv::Rect validRoi[2];
     cv::stereoRectify(m_cameraMatrixLeft, m_distCoeffsLeft,
                       m_cameraMatrixRight, m_distCoeffsRight,
@@ -299,7 +266,6 @@ bool StereoCalibrator::calibrate() {
     m_validRoiLeft = validRoi[0];
     m_validRoiRight = validRoi[1];
 
-    // 生成校正映射
     cv::initUndistortRectifyMap(m_cameraMatrixLeft, m_distCoeffsLeft,
                                  m_rectificationTransformLeft, m_projectionMatrixLeft,
                                  m_imageSize, CV_32FC1, m_leftMap1, m_leftMap2);
@@ -307,13 +273,10 @@ bool StereoCalibrator::calibrate() {
                                  m_rectificationTransformRight, m_projectionMatrixRight,
                                  m_imageSize, CV_32FC1, m_rightMap1, m_rightMap2);
 
-    // 保存结果
     if (!saveCalibrationResults()) {
         LOG_WARN("保存标定结果失败");
     }
     generateCalibrationReport();
-
-    // 验证并生成校正图像
     validateCalibrationResults();
 
     LOG_INFO("立体标定完成，RMS = {:.6f}", m_rmsError);
@@ -329,7 +292,6 @@ bool StereoCalibrator::saveCalibrationResults() {
             return false;
         }
 
-        // 使用 safe 写入辅助 lambda
         auto safeWrite = [&](const std::string& name, const cv::Mat& mat) {
             if (!mat.empty()) {
                 fs << name << mat;
@@ -363,7 +325,6 @@ bool StereoCalibrator::saveCalibrationResults() {
         safeWrite("projection_matrix_right", m_projectionMatrixRight);
         safeWrite("disparity_to_depth_mapping_matrix", m_disparityToDepthMappingMatrix);
 
-        // 直接使用 OpenCV 的 Rect 写入，会自动格式化为 [x y width height]
         fs << "valid_roi_left" << m_validRoiLeft;
         fs << "valid_roi_right" << m_validRoiRight;
 
@@ -464,7 +425,6 @@ bool StereoCalibrator::generateCalibrationReport() {
 }
 
 bool StereoCalibrator::validateCalibrationResults() {
-    // 使用第一对图像进行验证
     auto pairs = findCalibrationImagePairs();
     if (pairs.empty()) {
         LOG_WARN("没有图像可用于验证");
@@ -479,12 +439,10 @@ bool StereoCalibrator::validateCalibrationResults() {
         return false;
     }
 
-    // 转换为灰度用于映射
     cv::Mat leftGray, rightGray;
     cv::cvtColor(leftColor, leftGray, cv::COLOR_BGR2GRAY);
     cv::cvtColor(rightColor, rightGray, cv::COLOR_BGR2GRAY);
 
-    // 检查尺寸，必要时缩放
     if (leftGray.size() != m_imageSize) {
         cv::resize(leftGray, leftGray, m_imageSize);
         cv::resize(leftColor, leftColor, m_imageSize);
@@ -494,7 +452,6 @@ bool StereoCalibrator::validateCalibrationResults() {
         cv::resize(rightColor, rightColor, m_imageSize);
     }
 
-    // 校正
     cv::Mat leftRectGray, rightRectGray;
     cv::remap(leftGray, leftRectGray, m_leftMap1, m_leftMap2, cv::INTER_LINEAR);
     cv::remap(rightGray, rightRectGray, m_rightMap1, m_rightMap2, cv::INTER_LINEAR);
@@ -503,32 +460,27 @@ bool StereoCalibrator::validateCalibrationResults() {
     cv::remap(leftColor, leftRectColor, m_leftMap1, m_leftMap2, cv::INTER_LINEAR);
     cv::remap(rightColor, rightRectColor, m_rightMap1, m_rightMap2, cv::INTER_LINEAR);
 
-    // 并排显示
     cv::Mat grayPair, colorPair;
     cv::hconcat(leftRectGray, rightRectGray, grayPair);
     cv::hconcat(leftRectColor, rightRectColor, colorPair);
 
-    // 绘制水平线（极线），每 50 像素一条
     int lineSpacing = 50;
     for (int y = 0; y < grayPair.rows; y += lineSpacing) {
         cv::line(grayPair, cv::Point(0, y), cv::Point(grayPair.cols - 1, y),
-                 cv::Scalar(255, 255, 255), 1); // 白色线
+                 cv::Scalar(255, 255, 255), 1);
         cv::line(colorPair, cv::Point(0, y), cv::Point(colorPair.cols - 1, y),
-                 cv::Scalar(255, 0, 0), 1);     // 蓝色线
+                 cv::Scalar(255, 0, 0), 1);
     }
 
-    // 绘制有效区域 ROI 矩形（绿色）
-    // 左图 ROI 在左侧一半，右图 ROI 在右侧一半，需要偏移
     cv::Rect leftRoi = m_validRoiLeft;
     cv::Rect rightRoi = m_validRoiRight;
-    rightRoi.x += leftRectGray.cols; // 右图偏移到并排图像的右侧
+    rightRoi.x += leftRectGray.cols;
 
     cv::rectangle(grayPair, leftRoi, cv::Scalar(255, 255, 255), 2);
     cv::rectangle(grayPair, rightRoi, cv::Scalar(255, 255, 255), 2);
-    cv::rectangle(colorPair, leftRoi, cv::Scalar(0, 255, 0), 2);   // 绿色
+    cv::rectangle(colorPair, leftRoi, cv::Scalar(0, 255, 0), 2);
     cv::rectangle(colorPair, rightRoi, cv::Scalar(0, 255, 0), 2);
 
-    // 保存
     std::string grayOut = m_outputDir + "/rectification_validation_gray.jpg";
     std::string colorOut = m_outputDir + "/rectification_validation_color.jpg";
     cv::imwrite(grayOut, grayPair);

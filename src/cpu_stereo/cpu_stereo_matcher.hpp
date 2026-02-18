@@ -8,71 +8,67 @@ namespace stereo_depth {
 namespace cpu_stereo {
 
 /**
- * @brief CPU 立体匹配器，支持多种算法模式
+ * @brief CPU立体匹配器，支持SGBM和BM算法
  * 
- * 算法模式（通过配置文件 stereo.algorithm 选择）：
- *   - "census_wta" : 自定义 Census 变换 + 汉明距离 + WTA（已完整实现）
- *   - "bm"         : OpenCV StereoBM
- *   - "sgbm"       : OpenCV StereoSGBM
- *   - "default"    : 回退到 sgbm
+ * 从配置文件读取算法类型和参数，创建对应的OpenCV立体匹配器。
  */
 class CpuStereoMatcher {
 public:
     CpuStereoMatcher();
     ~CpuStereoMatcher();
 
-    // 从配置管理器初始化参数
-    bool initializeFromConfig();
+    /**
+     * @brief 从全局配置初始化匹配器
+     * @param config_path 配置文件路径（可选，默认使用ConfigManager）
+     * @return 是否成功
+     */
+    bool initializeFromConfig(const std::string& config_path = "");
 
-    // 直接设置参数
-    void setParameters(
-        int numDisparities,      // 最大视差
-        int blockSize,          // Census窗口大小 / BM窗口
-        int uniquenessRatio,    // 唯一性比率（%）
-        int p1, int p2,         // SGBM惩罚参数
-        bool useMedianFilter,
-        int medianFilterSize,
-        const std::string& algorithm = "sgbm"
-    );
-
-    // 核心计算接口
+    /**
+     * @brief 计算视差图
+     * @param left  左灰度图 (CV_8UC1)
+     * @param right 右灰度图 (CV_8UC1)
+     * @return 16位视差图 (CV_16UC1)，视差值为真实视差的16倍（与SGBM输出一致）
+     */
     cv::Mat compute(const cv::Mat& left, const cv::Mat& right);
 
-    // 获取视差图（16位无符号，无效视差标记为 maxDisparity）
-    cv::Mat getDisparityMap() const { return disparity_16u_; }
-
-    // 获取运行时间统计（毫秒）
+    /**
+     * @brief 获取最近一次计算的耗时（毫秒）
+     */
     double getLastTimeMs() const { return last_time_ms_; }
 
 private:
-    // 算法模式枚举
-    enum class Algorithm {
-        CENSUS_WTA,
-        BM,
-        SGBM,
-        UNKNOWN
-    };
-
-    // 参数
-    int num_disparities_ = 64;          // 自定义 Census 使用的视差范围
-    int num_disparities_opencv_ = 64;   // OpenCV 对齐后的视差范围（16的倍数）
-    int block_size_ = 7;
-    int uniqueness_ratio_ = 15;
-    int p1_ = 8;
-    int p2_ = 32;
-    bool use_median_filter_ = true;
-    int median_filter_size_ = 3;
-    Algorithm algorithm_ = Algorithm::SGBM;
-
-    // 结果
-    cv::Mat disparity_16u_;
+    cv::Ptr<cv::StereoMatcher> matcher_;   // 可以是 StereoSGBM 或 StereoBM
+    std::string algorithm_;                 // "sgbm" 或 "bm"
     double last_time_ms_ = 0.0;
 
-    // 内部实现
-    cv::Mat censusWTA(const cv::Mat& left, const cv::Mat& right);
-    cv::Mat computeBM(const cv::Mat& left, const cv::Mat& right);
-    cv::Mat computeSGBM(const cv::Mat& left, const cv::Mat& right);
-    void applyMedianFilter(cv::Mat& disp, int size);
+    // 通用参数
+    int disparity_range_;
+    int min_disparity_;
+    int median_filter_size_;
+
+    // SGBM特有参数
+    struct SgbmParams {
+        int block_size;
+        double p1;
+        double p2;
+        bool mode;
+    } sgbm_params_;
+
+    // BM特有参数
+    struct BmParams {
+        int block_size;
+        int pre_filter_type;
+        int pre_filter_size;
+        int pre_filter_cap;
+        int texture_threshold;
+        int uniqueness_ratio;
+        int speckle_window_size;
+        int speckle_range;
+        bool try_small_disp;
+    } bm_params_;
+
+    bool createMatcher();
 };
 
 } // namespace cpu_stereo

@@ -1,0 +1,2 @@
+stereo_calibration.yml.bak这份标定文件是我让deepseek手动编写的
+ds说这是无畸变，基线40.5mm，有效区域全图的标定文件

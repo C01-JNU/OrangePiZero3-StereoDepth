@@ -6,3 +6,7 @@
     publish_depth: false
     # 是否发布点云（从视差计算）
     publish_pointcloud: true
+
+    # 视差图预处理滤波
+    apply_disparity_filter: true      # 是否应用中值滤波
+    disparity_filter_size: 5           # 中值滤波窗口大小（奇数）
