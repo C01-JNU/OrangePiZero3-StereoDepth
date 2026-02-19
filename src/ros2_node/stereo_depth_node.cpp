@@ -42,8 +42,7 @@ public:
     : Node("stereo_depth_node"),
       target_fps_(15),
       use_rectification_(false),
-      publish_pointcloud_(false),
-      log_counter_(0)
+      publish_pointcloud_(false)
     {
         Logger::initialize("stereo_depth_ros", spdlog::level::info);
         RCLCPP_INFO(this->get_logger(), "立体深度节点启动");
@@ -84,6 +83,13 @@ public:
         // 读取 ROS2 参数（来自 params.yaml）
         this->declare_parameter<bool>("publish_pointcloud", false);
         publish_pointcloud_ = this->get_parameter("publish_pointcloud").as_bool();
+
+        this->declare_parameter<bool>("apply_disparity_filter", true);
+        this->declare_parameter<int>("disparity_filter_size", 5);
+        apply_disparity_filter_ = this->get_parameter("apply_disparity_filter").as_bool();
+        int filter_size = this->get_parameter("disparity_filter_size").as_int();
+        if (filter_size % 2 == 0) filter_size += 1;
+        disparity_filter_size_ = filter_size;
 
         // 从全局配置文件读取话题和其他参数
         std::string left_topic = cfg.get<std::string>("ros2.topics.left_image", "/camera/left/image_raw");
@@ -134,7 +140,7 @@ public:
             }
         }
 
-        // CPU 立体匹配器初始化（强制使用）
+        // CPU 立体匹配器初始化
         cpu_matcher_ = std::make_unique<cpu_stereo::CpuStereoMatcher>();
         if (!cpu_matcher_->initializeFromConfig()) {
             RCLCPP_ERROR(this->get_logger(), "CPU 匹配器初始化失败");
@@ -227,10 +233,18 @@ private:
         float proc_ms = std::chrono::duration<float, std::milli>(end - start).count();
         RCLCPP_DEBUG(this->get_logger(), "视差计算耗时: %.2f ms", proc_ms);
 
-        publishDisparity(disparity, left_msg->header.stamp);
+        // 可选的视差图滤波
+        cv::Mat disparity_filtered;
+        if (apply_disparity_filter_ && disparity_filter_size_ >= 3) {
+            cv::medianBlur(disparity, disparity_filtered, disparity_filter_size_);
+        } else {
+            disparity_filtered = disparity;
+        }
+
+        publishDisparity(disparity_filtered, left_msg->header.stamp);
 
         if (publish_pointcloud_ && rectifier_) {
-            auto cloud = generatePointCloudManual(disparity, left_msg->header.stamp);
+            auto cloud = generatePointCloudManual(disparity_filtered, left_msg->header.stamp);
             cloud_pub_->publish(cloud);
         }
     }
@@ -264,8 +278,6 @@ private:
         std::vector<Eigen::Vector3f> points;
         points.reserve(total_pixels);
 
-        bool first_valid_logged = false;
-
         for (int v = 0; v < disp_float.rows; ++v) {
             for (int u = 0; u < disp_float.cols; ++u) {
                 float d = disp_float.at<float>(v, u);
@@ -280,19 +292,7 @@ private:
                 float Y = (v - cy) * Z / fy;
 
                 points.emplace_back(X, Y, Z);
-
-                if (log_counter_ < 5 && !first_valid_logged) {
-                    RCLCPP_INFO(this->get_logger(), "第一个有效点: u=%d, v=%d, d=%f, X=%f, Y=%f, Z=%f",
-                                u, v, d, X, Y, Z);
-                    first_valid_logged = true;
-                }
             }
-        }
-
-        if (log_counter_ < 5) {
-            RCLCPP_INFO(this->get_logger(), "点云统计: 总像素=%d, 有效像素(视差>0.5)=%d, 生成点数=%zu",
-                        total_pixels, valid_pixels, points.size());
-            log_counter_++;
         }
 
         sensor_msgs::msg::PointCloud2 cloud_msg;
@@ -331,7 +331,8 @@ private:
     int target_fps_;
     bool use_rectification_;
     bool publish_pointcloud_;
-    int log_counter_;
+    bool apply_disparity_filter_;
+    int disparity_filter_size_;
 };
 
 } // namespace stereo_depth_ros

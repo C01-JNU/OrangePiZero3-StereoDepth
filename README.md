@@ -51,7 +51,7 @@ cd OrangePiZero3-StereoDepth
 - **ROS2 节点控制文件**：`src/ros2_node/config/params.yaml`  
   控制深度图（`publish_depth`）和点云（`publish_pointcloud`）的发布开关，以及视差图预处理滤波参数。默认关闭深度图发布，开启点云发布，并启用视差中值滤波。
 
-可根据注释修改，**修改后需重新编译**。
+**配置文件动态加载**：所有配置在程序启动时读取，修改后**只需重启程序（或 ROS2 节点）即可生效，无需重新编译**。但如果修改了 `config/global_config.yaml` 且未重新运行构建，则需要手动将文件复制到编译输出目录（例如 `build/bin/config/`）或重新触发构建（`colcon build`）以更新复制文件。
 
 ### 3. 标定
 项目默认提供了无畸变的标定文件 `calibration_results/stereo_calibration.yml`，对应 640×480 拼接图像，基线 40.5mm。如需重新标定，请参考下文【标定详细步骤】。
@@ -123,7 +123,7 @@ cv::Mat disparity = matcher.compute(left_rect, right_rect);   // 返回 CV_16U
 #### 5.3 构建与注意事项
 - **链接依赖**：在 CMake 中需链接 `cpu_stereo`、`utils`、`calibration_utils` 等模块。可参考项目根 `CMakeLists.txt` 中的目标链接方式。
 - **性能性质**：`compute()` 为**同步阻塞调用**，单帧耗时约 50~80ms（视参数而定）。**调用者必须自行实现帧率控制**（如使用双缓冲或生产者‑消费者线程分离采集与计算），否则将阻塞摄像头采集流。项目提供的 `main.cpp` 中已内置帧率控制示例（基于定时器等待），可供参考。
-- **配置驱动**：所有参数从 `config/global_config.yaml` 读取，修改后需重新编译项目（参数通过生成脚本嵌入二进制）。运行时需确保配置文件路径正确（可通过绝对路径或工作目录设置）。
+- **配置驱动**：所有参数从 `config/global_config.yaml` 读取，运行时动态加载，修改后重启程序即可生效。若修改配置文件后未重新构建，需手动将更新后的文件复制到可执行文件所在目录（如 `build/bin/config/`）或重新触发构建（`colcon build`）。
 
 ---
 
@@ -131,7 +131,7 @@ cv::Mat disparity = matcher.compute(left_rect, right_rect);   // 返回 CV_16U
 
 ### 主配置文件 `config/global_config.yaml`
 
-此文件包含所有算法和系统参数，修改后必须重新编译。主要结构如下：
+此文件包含所有算法和系统参数，程序启动时动态加载。主要结构如下：
 
 | 配置项 | 说明 |
 |--------|------|
@@ -195,8 +195,8 @@ disparity_filter_size: 5           # 中值滤波窗口大小（奇数）
 
 ## 注意事项
 
-1. **配置修改后必须重新编译**  
-   `config/global_config.yaml` 中的参数只在编译时应用。若修改了算法参数，需重新编译。
+1. **配置文件修改后无需重新编译**  
+   所有算法参数在程序启动时动态读取，修改 `config/global_config.yaml` 后只需重启程序（或 ROS2 节点）即可生效。但请注意，若修改的是源目录中的配置文件而未重新构建，需手动将更新后的文件复制到可执行文件所在目录（如 `build/bin/config/`）或重新运行 `colcon build` 以触发自动复制。
 
 2. **输入图像格式要求**  
    双目图像必须为左右拼接格式：若总分辨率为 `A×B`，则单眼分辨率为 `(A/2)×B`。否则需要自行预处理。
@@ -208,3 +208,6 @@ disparity_filter_size: 5           # 中值滤波窗口大小（奇数）
 
 4. **标定程序运行位置**  
    目前 `bin/stereo_calibrator` 和 `bin/test_calibration` 必须在项目根目录运行，其他程序无此限制。
+
+---
+
