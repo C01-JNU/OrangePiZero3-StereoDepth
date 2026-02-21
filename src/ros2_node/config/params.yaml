@@ -3,7 +3,7 @@
 /**:
   ros__parameters:
     # 是否发布深度图（从视差计算）
-    publish_depth: false
+    publish_depth: true
     # 是否发布点云（从视差计算）
     publish_pointcloud: true
 

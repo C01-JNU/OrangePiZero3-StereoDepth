@@ -84,6 +84,10 @@ public:
         this->declare_parameter<bool>("publish_pointcloud", false);
         publish_pointcloud_ = this->get_parameter("publish_pointcloud").as_bool();
 
+        // 新增：读取是否发布深度图
+        this->declare_parameter<bool>("publish_depth", false);
+        publish_depth_ = this->get_parameter("publish_depth").as_bool();
+
         this->declare_parameter<bool>("apply_disparity_filter", true);
         this->declare_parameter<int>("disparity_filter_size", 5);
         apply_disparity_filter_ = this->get_parameter("apply_disparity_filter").as_bool();
@@ -96,6 +100,8 @@ public:
         std::string right_topic = cfg.get<std::string>("ros2.topics.right_image", "/camera/right/image_raw");
         std::string disparity_topic = cfg.get<std::string>("ros2.topics.disparity", "/stereo/disparity");
         std::string pointcloud_topic = cfg.get<std::string>("ros2.topics.pointcloud", "/stereo/points");
+        // 新增：深度话题名（若无则使用默认值）
+        std::string depth_topic = cfg.get<std::string>("ros2.topics.depth", "/stereo/depth");
         int qos_depth = cfg.get<int>("ros2.qos_depth", 10);
         std::string qos_reliability = cfg.get<std::string>("ros2.qos_reliability", "best_effort");
 
@@ -171,8 +177,15 @@ public:
 
         disp_pub_ = image_transport::create_publisher(this, disparity_topic);
 
+        // 如果发布点云，初始化点云发布器
         if (publish_pointcloud_) {
             cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(pointcloud_topic, qos);
+        }
+
+        // 新增：如果发布深度图，初始化深度发布器
+        if (publish_depth_) {
+            depth_pub_ = image_transport::create_publisher(this, depth_topic);
+            RCLCPP_INFO(this->get_logger(), "深度图将发布到话题: %s", depth_topic.c_str());
         }
 
         auto period = std::chrono::milliseconds(1000 / target_fps_);
@@ -242,6 +255,12 @@ private:
         }
 
         publishDisparity(disparity_filtered, left_msg->header.stamp);
+
+        // 发布深度图（若启用）
+        if (publish_depth_) {
+            cv::Mat depth = generateDepth(disparity_filtered);
+            publishDepth(depth, left_msg->header.stamp);
+        }
 
         if (publish_pointcloud_ && rectifier_) {
             auto cloud = generatePointCloudManual(disparity_filtered, left_msg->header.stamp);
@@ -317,9 +336,50 @@ private:
         return cloud_msg;
     }
 
+    // 新增：生成深度图
+    cv::Mat generateDepth(const cv::Mat& disparity) {
+        if (!rectifier_) {
+            RCLCPP_WARN(this->get_logger(), "无法生成深度图：校正器未初始化");
+            return cv::Mat();
+        }
+
+        const auto& params = rectifier_->getCalibrationParams();
+        double fx = params.camera_matrix_left.at<double>(0, 0);
+        double baseline = cv::norm(params.translation_vector);  // 基线（米）
+
+        // 将视差图转换为浮点型（假设原始视差为 1/16 像素）
+        cv::Mat disp_float;
+        disparity.convertTo(disp_float, CV_32F, 1.0 / 16.0);
+
+        cv::Mat depth(disp_float.size(), CV_32F);
+        for (int v = 0; v < disp_float.rows; ++v) {
+            for (int u = 0; u < disp_float.cols; ++u) {
+                float d = disp_float.at<float>(v, u);
+                if (d > 0.5f) {  // 有效视差阈值
+                    float Z = static_cast<float>(fx * baseline / d);
+                    depth.at<float>(v, u) = Z;
+                } else {
+                    depth.at<float>(v, u) = 0.0f;  // 无效深度置 0
+                }
+            }
+        }
+        return depth;
+    }
+
+    // 新增：发布深度图
+    void publishDepth(const cv::Mat& depth, const rclcpp::Time& stamp) {
+        if (!publish_depth_ || depth.empty()) return;
+
+        auto depth_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "32FC1", depth).toImageMsg();
+        depth_msg->header.stamp = stamp;
+        depth_msg->header.frame_id = "stereo_depth";  // 与点云 frame_id 保持一致
+        depth_pub_.publish(depth_msg);
+    }
+
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr left_sub_, right_sub_;
     image_transport::Publisher disp_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
+    image_transport::Publisher depth_pub_;  // 新增深度图发布器
     rclcpp::TimerBase::SharedPtr timer_;
 
     sensor_msgs::msg::Image::SharedPtr left_image_, right_image_;
@@ -331,6 +391,7 @@ private:
     int target_fps_;
     bool use_rectification_;
     bool publish_pointcloud_;
+    bool publish_depth_;               // 新增：是否发布深度图
     bool apply_disparity_filter_;
     int disparity_filter_size_;
 };

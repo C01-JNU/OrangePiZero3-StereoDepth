@@ -27,7 +27,7 @@ sudo apt install libeigen3-dev   # 线性代数库（用于点云生成）
 - 默认拼接图像分辨率：**640x480**
 - 默认编译 ROS2 节点
 - 默认目标帧率上限：**10fps**（可在 `config/global_config.yaml` 的 `performance.target_fps` 修改）
-- 默认关闭深度图发布，开启点云发布（可在 `src/ros2_node/config/params.yaml` 修改）
+- 默认开启深度图和点云发布（可在 `src/ros2_node/config/params.yaml` 修改）
 
 ---
 
